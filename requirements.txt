@@ -7,3 +7,6 @@ opencv-python
 numpy
 torch
 omegaconf
+Flask>=3.0.0
+fastapi
+uvicorn[standard]
