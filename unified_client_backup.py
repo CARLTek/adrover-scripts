@@ -3,6 +3,7 @@ import struct
 import cv2
 import json
 import time
+import os
 from typing import Optional, Dict, Any, Tuple
 import argparse
 
@@ -17,17 +18,16 @@ class UnifiedClient:
         self.cap = None
         self.connected = False
         self.connection_retry_delay = 2
+        self.display_analytics = True
+        # Only ads window should be visible on the client side
+        self.show_client_window = False
         self.fps_counter = 0
         self.fps_start_time = time.time()
         self.last_fps_value: Optional[float] = None
-        
-        print(f"[CLIENT] Initialized with server: {server_ip}:{server_port}, camera source: {camera_source}")
 
     def initialize_camera(self) -> bool:
-        print(f"[CLIENT] Initializing camera with source: {self.camera_source}")
         self.cap = cv2.VideoCapture(self.camera_source)
         if not self.cap.isOpened():
-            print(f"[CLIENT] ERROR: Failed to open camera source: {self.camera_source}")
             return False
         # Favor FPS: moderate resolution and small buffer
         try:
@@ -35,13 +35,10 @@ class UnifiedClient:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.cap.set(cv2.CAP_PROP_FPS, 30)
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            print(f"[CLIENT] Camera configured: 640x480, 30 FPS")
-        except Exception as e:
-            print(f"[CLIENT] Warning: Could not set camera properties: {str(e)}")
+        except Exception:
+            pass
         # Warmup read
         ret, frame = self.cap.read()
-        if ret and frame is not None:
-            print(f"[CLIENT] Camera initialized successfully")
         return bool(ret and frame is not None)
 
     def set_camera_source(self, new_source: int) -> bool:
@@ -59,16 +56,13 @@ class UnifiedClient:
         return ok
 
     async def connect(self) -> Tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        print(f"[CLIENT] Attempting to connect to server at {self.server_ip}:{self.server_port}")
         while True:
             try:
                 reader, writer = await asyncio.open_connection(self.server_ip, self.server_port)
                 self.connected = True
-                print(f"[CLIENT] Successfully connected to server at {self.server_ip}:{self.server_port}")
                 return reader, writer
-            except Exception as e:
+            except Exception:
                 self.connected = False
-                print(f"[CLIENT] Connection failed: {str(e)}. Retrying in {self.connection_retry_delay} seconds...")
                 await asyncio.sleep(self.connection_retry_delay)
 
     @staticmethod
@@ -169,10 +163,82 @@ class UnifiedClient:
         # return last known value to have a stable readout between updates
         return self.last_fps_value
 
+    async def display_ads(self, ad_folder: str = "video", default_image_duration: int = 30, fps: int = 60):
+        """Continuously display ads (videos/images) from a folder in a separate window.
+
+        This runs independently of the AI streaming pipeline.
+        """
+        window_name = 'Ad Display'
+        try:
+            while True:
+                try:
+                    ads = [ad for ad in os.listdir(ad_folder) if ad.lower().endswith((".mp4", ".mov", ".jpg", ".png"))]
+                except Exception:
+                    ads = []
+
+                if not ads:
+                    await asyncio.sleep(5)
+                    continue
+
+                for ad in ads:
+                    ad_path = os.path.join(ad_folder, ad)
+                    ext = os.path.splitext(ad)[1].lower()
+
+                    if ext in (".mp4", ".mov"):
+                        cap = cv2.VideoCapture(ad_path)
+                        if not cap.isOpened():
+                            continue
+                        # Try to fetch FPS for pacing; fallback to 30
+                        try:
+                            v_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                            if v_fps <= 0:
+                                v_fps = 30.0
+                        except Exception:
+                            v_fps = 30.0
+
+                        while True:
+                            ret, frame = cap.read()
+                            if not ret:
+                                break
+                            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                            cv2.imshow(window_name, frame)
+                            if cv2.waitKey(1) & 0xFF == ord('q'):
+                                # Allow closing ads window loop on 'q'
+                                raise asyncio.CancelledError
+                            await asyncio.sleep(1.0 / v_fps)
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                    else:
+                        img = cv2.imread(ad_path)
+                        if img is None:
+                            continue
+                        start_ts = time.time()
+                        while (time.time() - start_ts) < float(default_image_duration):
+                            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+                            cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+                            cv2.imshow(window_name, img)
+                            if cv2.waitKey(1) & 0xFF == ord('q'):
+                                raise asyncio.CancelledError
+                            await asyncio.sleep(1.0 / float(fps))
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                cv2.destroyWindow(window_name)
+            except Exception:
+                pass
+
     async def run(self):
         if not self.initialize_camera():
-            print('[CLIENT] Failed to initialize camera')
+            print('Failed to initialize camera')
             return
+
+        if self.show_client_window:
+            cv2.namedWindow('Unified Client', cv2.WINDOW_NORMAL)
+            cv2.resizeWindow('Unified Client', 960, 720)
 
         reader, writer = None, None
 
@@ -183,7 +249,6 @@ class UnifiedClient:
 
                 ret, frame = self.cap.read()
                 if not ret:
-                    print("[CLIENT] Warning: Failed to read frame from camera")
                     await asyncio.sleep(0.01)
                     continue
 
@@ -192,21 +257,16 @@ class UnifiedClient:
                 if max(h, w) > 960:
                     scale = 960.0 / max(h, w)
                     frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-                    print(f"[CLIENT] Resized frame to {int(w * scale)}x{int(h * scale)}")
 
                 try:
                     ad_id = None  # extend here if you need ad IDs
                     writer.write(self._encode_request(frame, ad_id))
                     await writer.drain()
-                    print(f"[CLIENT] Frame sent to server (size: {frame.shape[1]}x{frame.shape[0]})")
 
                     resp = await asyncio.wait_for(self._read_response(reader), timeout=5.0)
                     analytics = resp.get('analytics') if resp and resp.get('status') == 'success' else None
-                    if analytics:
-                        print(f"[CLIENT] Received analytics: {len(analytics)} data points")
-                except Exception as e:
+                except Exception:
                     self.connected = False
-                    print(f"[CLIENT] Connection error: {str(e)}")
                     try:
                         if writer:
                             writer.close()
@@ -215,16 +275,19 @@ class UnifiedClient:
                         pass
                     continue
 
-                # Handle keyboard input for control
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("[CLIENT] User requested exit")
-                    break
-                elif key == ord('c'):
-                    # Toggle between laptop cam (0) and USB cam (1) by default
-                    alt = 1 if self.camera_source == 0 else 0
-                    print(f"[CLIENT] User requested camera switch to {alt}")
-                    self.set_camera_source(alt)
+                if self.show_client_window:
+                    disp = self._draw_overlay(frame, analytics) if (self.display_analytics and analytics) else frame
+                    cv2.imshow('Unified Client', disp)
+
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord('q'):
+                        break
+                    elif key == ord('a'):
+                        self.display_analytics = not self.display_analytics
+                    elif key == ord('c'):
+                        # Toggle between laptop cam (0) and USB cam (1) by default
+                        alt = 1 if self.camera_source == 0 else 0
+                        self.set_camera_source(alt)
 
                 await asyncio.sleep(0)  # yield
         finally:
@@ -244,10 +307,16 @@ async def main():
     parser.add_argument('--server-ip', default='127.0.0.1')
     parser.add_argument('--server-port', type=int, default=12350)
     parser.add_argument('--camera', type=int, default=0, help='OpenCV camera index (0=laptop, 1=USB)')
+    parser.add_argument('--ads-folder', default='video', help='Folder containing ad videos/images')
+    parser.add_argument('--ads-image-duration', type=int, default=30, help='Seconds to show each image')
+    parser.add_argument('--ads-fps', type=int, default=60, help='FPS for image display pacing')
     args = parser.parse_args()
 
     client = UnifiedClient(server_ip=args.server_ip, server_port=args.server_port, camera_source=args.camera)
-    await client.run()
+    await asyncio.gather(
+        client.run(),
+        client.display_ads(ad_folder=args.ads_folder, default_image_duration=args.ads_image_duration, fps=args.ads_fps)
+    )
 
 
 if __name__ == '__main__':
