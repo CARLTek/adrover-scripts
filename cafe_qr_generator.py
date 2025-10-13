@@ -7,6 +7,8 @@ import socket
 PROMO_QR_PATH = "static/cafe_promo_qr.png"
 QR_ID = "cafe_promo"
 SERVER_PORT = 8000
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 # Get the machine's IP address
 def get_ip_address():
@@ -27,7 +29,11 @@ def create_portrait_promo_qr():
     os.makedirs("static", exist_ok=True)
     
     # Generate the QR code URL
-    scan_url = f"http://{SERVER_HOST}:{SERVER_PORT}/scan/{QR_ID}"
+    base = (PUBLIC_BASE_URL or RENDER_EXTERNAL_URL)
+    if base:
+        scan_url = f"{base.rstrip('/')}/scan/{QR_ID}"
+    else:
+        scan_url = f"http://{SERVER_HOST}:{SERVER_PORT}/scan/{QR_ID}"
     
     # Create QR code
     qr = qrcode.QRCode(

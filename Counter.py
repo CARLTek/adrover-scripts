@@ -35,7 +35,10 @@ DB_FILE = "qr_counter.db"
 QR_CODE_PATH = "static/qrcode.png"
 
 # Server host and port
-SERVER_PORT = 8000
+SERVER_PORT = int(os.getenv("PORT", "8000"))
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
 # Get the machine's IP address
 def get_ip_address():
@@ -53,6 +56,16 @@ def get_ip_address():
 
 SERVER_HOST = get_ip_address()
 print(f"Server will be accessible at: http://{SERVER_HOST}:{SERVER_PORT}")
+
+def get_base_url():
+    """Return the base URL for QR scan links.
+    Priority: PUBLIC_BASE_URL > RENDER_EXTERNAL_URL > local host:port
+    """
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL.rstrip('/')
+    if RENDER_EXTERNAL_URL:
+        return RENDER_EXTERNAL_URL.rstrip('/')
+    return f"http://{SERVER_HOST}:{SERVER_PORT}"
 
 # Initialize FastAPI
 app = FastAPI(
@@ -162,11 +175,8 @@ def get_recent_scans(qr_id, limit=10):
     conn.close()
     return scans
 
-# Initialize database and generate QR code with the machine's IP address
+# Initialize database
 init_db()
-scan_url = f"http://{SERVER_HOST}:{SERVER_PORT}/scan/{DEFAULT_QR_ID}"
-generate_qr_code(scan_url)
-print(f"QR code generated with URL: {scan_url}")
 
 # --- HTML TEMPLATES (Served by FastAPI) ---
 def get_promo_code_html(promo_data, qr_id):

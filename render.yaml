@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: qr-scan-tracker
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python Counter.py
+    envVars:
+      PUBLIC_BASE_URL: ${RENDER_EXTERNAL_URL}
