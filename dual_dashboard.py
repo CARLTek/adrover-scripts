@@ -883,7 +883,8 @@ HTML = """
 
       function connect(){
         ensureCharts();
-        ws = new WebSocket(`ws://${location.host}/ws`);
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${proto}://${location.host}/ws`);
         ws.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
