@@ -9,6 +9,8 @@ QR_ID = "cafe_promo"
 SERVER_PORT = 8000
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+# Default to deployed Render service if env vars are not provided locally
+DEFAULT_PUBLIC_BASE_URL = os.getenv("DEFAULT_PUBLIC_BASE_URL", "https://ad-rover-dashboarb.onrender.com")
 
 # Get the machine's IP address
 def get_ip_address():
@@ -29,7 +31,8 @@ def create_portrait_promo_qr():
     os.makedirs("static", exist_ok=True)
     
     # Generate the QR code URL
-    base = (PUBLIC_BASE_URL or RENDER_EXTERNAL_URL)
+    base = (PUBLIC_BASE_URL or RENDER_EXTERNAL_URL or DEFAULT_PUBLIC_BASE_URL)
+    # Always prefer a public base URL, otherwise fall back to local host:port
     if base:
         scan_url = f"{base.rstrip('/')}/scan/{QR_ID}"
     else:
@@ -120,6 +123,10 @@ def create_portrait_promo_qr():
     canvas.save(PROMO_QR_PATH)
     print(f"Promotional QR code created and saved to {PROMO_QR_PATH}")
     print(f"QR code URL: {scan_url}")
+    if PUBLIC_BASE_URL or RENDER_EXTERNAL_URL:
+        print("Base URL source: environment variable")
+    else:
+        print("Base URL source: default Render URL (set PUBLIC_BASE_URL to override)")
     
     return PROMO_QR_PATH
 

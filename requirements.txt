@@ -1,5 +1,5 @@
 huggingface_hub
-ultralytics==8.1.0
+ultralytics
 timm==0.8.13.dev0
 yt_dlp
 lapx>=0.5.2
@@ -10,3 +10,9 @@ omegaconf
 Flask>=3.0.0
 fastapi
 uvicorn[standard]
+qrcode
+Pillow
+dropbox
+requests
+SQLAlchemy>=2.0
+psycopg2-binary

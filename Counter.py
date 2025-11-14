@@ -1,19 +1,25 @@
 import os
 import json
-import sqlite3
 import qrcode
 import socket
 import random
 import string
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 from fastapi import FastAPI, Path, HTTPException, Request
 from fastapi.responses import RedirectResponse, HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 import threading
-import cv2
-import numpy as np
 import time
+from backup_manager import configure_backup_hooks
+from sqlalchemy import (
+    create_engine, MetaData, Table, Column, Integer, String,
+    select, func, and_, insert, text
+)
 
 # --- CONFIGURATION ---
 # The QR ID acts as a unique identifier for this specific robot/campaign
@@ -28,8 +34,45 @@ TARGET_REDIRECT_URL = "https://www.google.com/search?q=your+advertising+landing+
 # Cafe promotion redirect URL
 CAFE_PROMO_REDIRECT_URL = "https://www.google.com/search?q=cafe+lounge+20+percent+off+coupon"
 
-# SQLite database file
-DB_FILE = "qr_counter.db"
+# SQLite database file (override with env var DB_FILE_PATH)
+DB_FILE = os.getenv("DB_FILE_PATH", "qr_counter.db")
+
+# Optional Postgres connection URL (e.g., Neon). If set, we use Postgres.
+DATABASE_URL = os.getenv("DATABASE_URL")
+USING_POSTGRES = bool(DATABASE_URL)
+
+# Create DB engine (Postgres when DATABASE_URL is set, else local SQLite)
+if USING_POSTGRES:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+else:
+    engine = create_engine(
+        f"sqlite:///{DB_FILE}",
+        connect_args={"check_same_thread": False}
+    )
+
+# Define schema with SQLAlchemy for portability
+metadata = MetaData()
+
+qr_scans_table = Table(
+    "qr_scans",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("qr_id", String),
+    Column("timestamp", String),
+    Column("ip_address", String),
+    Column("source", String),
+)
+
+promo_codes_table = Table(
+    "promo_codes",
+    metadata,
+    Column("id", Integer, primary_key=True),
+    Column("code", String, unique=True),
+    Column("qr_id", String),
+    Column("created_at", String),
+    Column("expires_at", String),
+    Column("used", Integer),
+)
 
 # QR code image path
 QR_CODE_PATH = "static/qrcode.png"
@@ -39,6 +82,7 @@ SERVER_PORT = int(os.getenv("PORT", "8000"))
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+DISPLAY_TIMEZONE = os.getenv("DISPLAY_TIMEZONE", "Asia/Karachi")
 
 # Get the machine's IP address
 def get_ip_address():
@@ -79,34 +123,21 @@ os.makedirs("static", exist_ok=True)
 # Mount static files directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Initialize SQLite database
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS qr_scans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        qr_id TEXT,
-        timestamp TEXT,
-        ip_address TEXT
-    )
-    ''')
-    
-    # Create promo codes table
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS promo_codes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        code TEXT UNIQUE,
-        qr_id TEXT,
-        created_at TEXT,
-        expires_at TEXT,
-        used INTEGER DEFAULT 0
-    )
-    ''')
-    
-    conn.commit()
-    conn.close()
-    print(f"Database initialized at {DB_FILE}")
+    """Create tables if they do not exist for the selected backend."""
+    try:
+        metadata.create_all(engine)
+        # For legacy SQLite DBs, ensure 'source' column exists on qr_scans
+        if not USING_POSTGRES:
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text("ALTER TABLE qr_scans ADD COLUMN source TEXT"))
+            except Exception:
+                # Column already exists or SQLite variant; ignore
+                pass
+        print(f"Database initialized ({'Postgres' if USING_POSTGRES else 'SQLite'})")
+    except Exception as e:
+        print(f"Failed to initialize database: {e}")
     
 # Generate a unique promo code
 def generate_promo_code(qr_id):
@@ -114,29 +145,58 @@ def generate_promo_code(qr_id):
     code_chars = string.ascii_uppercase + string.digits
     code = ''.join(random.choice(code_chars) for _ in range(6))
     
-    # Set expiration time (60 minutes from now)
+    # Set expiration time (15 minutes from now)
     created_at = datetime.now()
-    expires_at = created_at + timedelta(minutes=60)
+    expires_at = created_at + timedelta(minutes=15)
     
     # Format timestamps for SQLite
     created_at_str = created_at.strftime("%Y-%m-%d %H:%M:%S")
     expires_at_str = expires_at.strftime("%Y-%m-%d %H:%M:%S")
     
     # Store in database
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO promo_codes (code, qr_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-        (code, qr_id, created_at_str, expires_at_str)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                insert(promo_codes_table).values(
+                    code=code,
+                    qr_id=qr_id,
+                    created_at=created_at_str,
+                    expires_at=expires_at_str,
+                    used=0,
+                )
+            )
+    except Exception as e:
+        print(f"Failed to insert promo code: {e}")
     
     return {
         "code": code,
         "created_at": created_at,
         "expires_at": expires_at
     }
+
+def get_promo_by_code(qr_id: str, code: str):
+    """Fetch promo code record by code and qr_id; returns None if missing."""
+    try:
+        with engine.connect() as conn:
+            sel = select(
+                promo_codes_table.c.code,
+                promo_codes_table.c.qr_id,
+                promo_codes_table.c.created_at,
+                promo_codes_table.c.expires_at,
+                promo_codes_table.c.used,
+            ).where(and_(
+                promo_codes_table.c.qr_id == qr_id,
+                promo_codes_table.c.code == code,
+            ))
+            row = conn.execute(sel).fetchone()
+        if not row:
+            return None
+        created_at = datetime.strptime(row[2], "%Y-%m-%d %H:%M:%S")
+        expires_at = datetime.strptime(row[3], "%Y-%m-%d %H:%M:%S")
+        used = int(row[4] or 0)
+        return {"code": row[0], "qr_id": row[1], "created_at": created_at, "expires_at": expires_at, "used": used}
+    except Exception:
+        return None
 
 # Generate QR code
 def generate_qr_code(data, output_path=QR_CODE_PATH):
@@ -155,28 +215,49 @@ def generate_qr_code(data, output_path=QR_CODE_PATH):
     return output_path
 
 # Get scan count for a QR ID
-def get_scan_count(qr_id):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM qr_scans WHERE qr_id = ?", (qr_id,))
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+def get_scan_count(qr_id, source=None):
+    try:
+        with engine.connect() as conn:
+            if source:
+                sel = select(func.count(qr_scans_table.c.id)).where(and_(
+                    qr_scans_table.c.qr_id == qr_id,
+                    qr_scans_table.c.source == source,
+                ))
+            else:
+                sel = select(func.count(qr_scans_table.c.id)).where(
+                    qr_scans_table.c.qr_id == qr_id
+                )
+            result = conn.execute(sel).scalar()
+            return int(result or 0)
+    except Exception:
+        return 0
 
 # Get recent scans for a QR ID
 def get_recent_scans(qr_id, limit=10):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute(
-        "SELECT timestamp, ip_address FROM qr_scans WHERE qr_id = ? ORDER BY id DESC LIMIT ?", 
-        (qr_id, limit)
-    )
-    scans = cursor.fetchall()
-    conn.close()
-    return scans
+    try:
+        with engine.connect() as conn:
+            sel = (
+                select(
+                    qr_scans_table.c.timestamp,
+                    qr_scans_table.c.ip_address,
+                    qr_scans_table.c.source,
+                )
+                .where(qr_scans_table.c.qr_id == qr_id)
+                .order_by(qr_scans_table.c.id.desc())
+                .limit(int(limit or 10))
+            )
+            rows = conn.execute(sel).fetchall()
+            return [(r[0], r[1], r[2]) for r in rows]
+    except Exception:
+        return []
 
-# Initialize database
-init_db()
+# Configure DB lifecycle: use backup hooks only for SQLite, init DB for both
+if USING_POSTGRES:
+    # No filesystem backups needed; ensure schema exists
+    init_db()
+else:
+    # With ephemeral disk, keep external backup/restore for SQLite
+    configure_backup_hooks(app, db_path=DB_FILE, post_restore=init_db)
 
 # --- HTML TEMPLATES (Served by FastAPI) ---
 def get_promo_code_html(promo_data, qr_id):
@@ -191,7 +272,7 @@ def get_promo_code_html(promo_data, qr_id):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Cafe Lounge - 20% OFF Coupon</title>
+        <title>Cafe Lounge - 10% OFF Coupon</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             body {{ font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f5f5f5; }}
@@ -210,9 +291,9 @@ def get_promo_code_html(promo_data, qr_id):
             <div class="card">
                 <div class="header">
                     <h1>Cafe Lounge</h1>
-                    <h2>20% OFF Your Order</h2>
+                    <h2>10% OFF Your Order</h2>
                 </div>
-                <p>Show this code to the cashier to redeem your discount:</p>
+                <p>Show this code to the cashier to redeem your 10% discount:</p>
                 <div class="promo-code">{code}</div>
                 <div class="expiry">
                     Code expires at: {expires_at.strftime("%I:%M %p")} today<br>
@@ -237,15 +318,37 @@ def get_promo_code_html(promo_data, qr_id):
 
 def format_time_str(ts_str: str) -> str:
     try:
-        dt = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-        return dt.strftime("%I:%M%p").lower().lstrip('0')
+        # Treat stored timestamp as UTC and convert to display timezone
+        dt_utc = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        if ZoneInfo and DISPLAY_TIMEZONE:
+            dt_local = dt_utc.astimezone(ZoneInfo(DISPLAY_TIMEZONE))
+        else:
+            # Fallback: use system local timezone
+            dt_local = dt_utc.astimezone()
+        return dt_local.strftime("%I:%M %p").lstrip('0')
     except Exception:
         return ts_str
 
-def get_dashboard_html(qr_id, scan_count, recent_scans):
+def get_client_ip(request: Request) -> str:
+    """Extract the real client IP, respecting proxy headers."""
+    try:
+        # X-Forwarded-For may contain a list: client, proxy1, proxy2
+        xff = request.headers.get("x-forwarded-for") or request.headers.get("X-Forwarded-For")
+        if xff:
+            ip = xff.split(",")[0].strip()
+            if ip:
+                return ip
+        xri = request.headers.get("x-real-ip") or request.headers.get("X-Real-IP")
+        if xri:
+            return xri.strip()
+        return (request.client.host if request and request.client else "unknown")
+    except Exception:
+        return "unknown"
+
+def get_dashboard_html(qr_id, total_count, adrover_count, other_count, recent_scans):
     scans_html = ""
-    for timestamp, ip in recent_scans:
-        scans_html += f"<tr><td>{format_time_str(timestamp)}</td><td>{ip}</td></tr>"
+    for timestamp, ip, source in recent_scans:
+        scans_html += f"<tr><td>{format_time_str(timestamp)}</td><td>{ip}</td><td>{source or 'other'}</td></tr>"
     
     return f"""
     <!DOCTYPE html>
@@ -269,9 +372,11 @@ def get_dashboard_html(qr_id, scan_count, recent_scans):
                 try {{
                     const res = await fetch('/api/stats/{qr_id}');
                     const data = await res.json();
-                    document.getElementById('scan-count').textContent = data.scan_count;
+                    document.getElementById('scan-count').textContent = data.scan_count_total;
+                    document.getElementById('adrover-count').textContent = data.scan_count_adrover;
+                    document.getElementById('other-count').textContent = data.scan_count_other;
                     const tbody = document.getElementById('recent-scans');
-                    tbody.innerHTML = data.recent_scans.map(s => `\n<tr><td>${{s.timestamp}}</td><td>${{s.ip_address}}</td></tr>`).join('');
+                    tbody.innerHTML = data.recent_scans.map(s => '\n<tr><td>' + s.timestamp + '</td><td>' + s.ip_address + '</td><td>' + (s.source || 'other') + '</td></tr>').join('');
                 }} catch (e) {{ console.error('Failed to refresh stats', e); }}
             }}
             setInterval(refreshStats, 2000);
@@ -287,7 +392,15 @@ def get_dashboard_html(qr_id, scan_count, recent_scans):
             <div class="content">
                 <div class="card">
                     <h2>Total Scans</h2>
-                    <div id="scan-count" class="count">{scan_count}</div>
+                    <div id="scan-count" class="count">{total_count}</div>
+                </div>
+                <div class="card">
+                    <h2>Adrover Total Scans</h2>
+                    <div id="adrover-count" class="count">{adrover_count}</div>
+                </div>
+                <div class="card">
+                    <h2>Other Scans</h2>
+                    <div id="other-count" class="count">{other_count}</div>
                 </div>
                 <div class="card">
                     <h2>Recent Scans</h2>
@@ -296,6 +409,7 @@ def get_dashboard_html(qr_id, scan_count, recent_scans):
                             <tr>
                                 <th>Time</th>
                                 <th>IP Address</th>
+                                <th>Source</th>
                             </tr>
                         </thead>
                         <tbody id="recent-scans">
@@ -323,7 +437,7 @@ def get_promo_code_html(promo_data, qr_id):
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Cafe Lounge - 20% OFF Coupon</title>
+        <title>Cafe Lounge - 10% OFF Coupon</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
             body {{
@@ -399,16 +513,16 @@ def get_promo_code_html(promo_data, qr_id):
     <body>
         <div class="container">
             <div class="header">
-                <h1>20% OFF YOUR ORDER</h1>
+                <h1>10% OFF YOUR ORDER</h1>
                 <p>Cafe Lounge Special Offer</p>
             </div>
             <div class="content">
                 <div class="logo">CAFE LOUNGE</div>
-                <p class="instructions">Show this code to your cashier to receive 20% off your entire order:</p>
+                <p class="instructions">Show this code to your cashier to receive 10% off your entire order:</p>
                 
                 <div class="promo-code">{code}</div>
                 
-                <div class="expiry">Valid until {expires_at_fmt}</div>
+                <div class="expiry">Valid until {expires_at_fmt} (15 minutes from scan)</div>
                 <div class="timer">({minutes_remaining} minutes remaining)</div>
                 
                 <p class="instructions">
@@ -432,30 +546,46 @@ async def root():
     """Redirects root to the default dashboard ID."""
     return RedirectResponse(url=f"/dashboard/{DEFAULT_QR_ID}")
 
+@app.head("/")
+async def root_head():
+    """Explicit HEAD handler to satisfy platform probes."""
+    return HTMLResponse(content="", status_code=200)
+
+@app.get("/healthz")
+async def healthz():
+    """Simple health check endpoint used by Render."""
+    return {"status": "ok"}
+
 @app.get("/dashboard/{qr_id}", response_class=HTMLResponse)
 async def show_dashboard(
     qr_id: str = Path(..., title="The ID of the QR code campaign")
 ):
     """Serves the HTML dashboard page."""
     # Get scan count and recent scans
-    scan_count = get_scan_count(qr_id)
+    total_count = get_scan_count(qr_id)
+    adrover_count = get_scan_count(qr_id, source="adrover")
+    other_count = total_count - adrover_count
     recent_scans = get_recent_scans(qr_id)
     
     # Render HTML with data
-    html_content = get_dashboard_html(qr_id, scan_count, recent_scans)
+    html_content = get_dashboard_html(qr_id, total_count, adrover_count, other_count, recent_scans)
     
     return HTMLResponse(content=html_content)
 
 @app.get("/api/stats/{qr_id}")
 async def api_stats(qr_id: str = Path(..., title="The ID of the QR code campaign")):
     """Returns JSON stats for live dashboard updates."""
-    scan_count = get_scan_count(qr_id)
+    total_count = get_scan_count(qr_id)
+    adrover_count = get_scan_count(qr_id, source="adrover")
+    other_count = total_count - adrover_count
     recent_scans = get_recent_scans(qr_id)
     return {
-        "scan_count": scan_count,
+        "scan_count_total": total_count,
+        "scan_count_adrover": adrover_count,
+        "scan_count_other": other_count,
         "recent_scans": [
-            {"timestamp": format_time_str(ts), "ip_address": ip}
-            for (ts, ip) in recent_scans
+            {"timestamp": format_time_str(ts), "ip_address": ip, "source": src}
+            for (ts, ip, src) in recent_scans
         ]
     }
 
@@ -472,35 +602,66 @@ async def scan_qr_code(
     """
     Records a QR code scan in the SQLite database and either displays a promo code or redirects to the target URL.
     """
-    try:
-        # Get client IP address
-        ip_address = request.client.host if request else "unknown"
-        
-        # Connect to database and record the scan
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        cursor.execute(
-            "INSERT INTO qr_scans (qr_id, timestamp, ip_address) VALUES (?, ?, ?)",
-            (qr_id, timestamp, ip_address)
-        )
-        conn.commit()
-        conn.close()
-        
-        print(f"Scan recorded for '{qr_id}' from IP {ip_address}")
-    except Exception as e:
-        print(f"Failed to record scan for '{qr_id}'. Error: {e}")
-    
-    # For cafe promotion QR code, generate a unique promo code and display it
+    # For cafe promotion QR code, implement refresh-safe behavior using cookies
     if qr_id == CAFE_PROMO_QR_ID:
+        # Try to reuse an existing promo code from cookie if still valid
+        existing_code = None
         try:
-            # Generate a unique promo code that expires in 60 minutes
+            existing_code = request.cookies.get(f"promo_code_{qr_id}")
+        except Exception:
+            existing_code = None
+
+        if existing_code:
+            promo = get_promo_by_code(qr_id, existing_code)
+            if promo:
+                now_dt = datetime.now()
+                if promo.get("expires_at") and promo["expires_at"] > now_dt and int(promo.get("used", 0)) == 0:
+                    # Reuse existing code and DO NOT increment scan again
+                    html = get_promo_code_html(promo, qr_id)
+                    return HTMLResponse(content=html)
+
+        # No valid cookie promo, record the scan ONCE and issue a new code
+        try:
+            ip_address = get_client_ip(request)
+            source = None
+            try:
+                source = request.query_params.get("src", None)
+            except Exception:
+                source = None
+            if not source:
+                source = "other"
+
+            # Store timestamps in UTC for consistent display
+            timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            with engine.begin() as conn:
+                conn.execute(
+                    insert(qr_scans_table).values(
+                        qr_id=qr_id,
+                        timestamp=timestamp,
+                        ip_address=ip_address,
+                        source=source,
+                    )
+                )
+            print(f"Scan recorded for '{qr_id}' from IP {ip_address} (source={source})")
+        except Exception as e:
+            print(f"Failed to record scan for '{qr_id}'. Error: {e}")
+
+        # Generate and return a new promo code; set cookie to prevent recount on refresh
+        try:
             promo_data = generate_promo_code(qr_id)
             print(f"Generated promo code: {promo_data['code']} for {qr_id}")
-            
-            # Return HTML page with the promo code
-            return get_promo_code_html(promo_data, qr_id)
+            html = get_promo_code_html(promo_data, qr_id)
+            resp = HTMLResponse(content=html)
+            # Cookie lasts until promo expiry (max_age seconds)
+            max_age = max(60, int((promo_data["expires_at"] - datetime.now()).total_seconds()))
+            resp.set_cookie(
+                key=f"promo_code_{qr_id}",
+                value=promo_data["code"],
+                max_age=max_age,
+                httponly=True,
+                samesite="Lax"
+            )
+            return resp
         except Exception as e:
             print(f"Error generating promo code: {e}")
             return HTMLResponse(content=f"<html><body><h1>Error</h1><p>Could not generate promo code: {e}</p></body></html>")
@@ -511,6 +672,9 @@ async def scan_qr_code(
 # Function to display QR code with OpenCV
 def display_qr_with_opencv():
     """Display the QR code in a window with real-time scan count."""
+    # Lazy import heavy modules to avoid slowing server startup
+    import cv2
+    import numpy as np
     # Load the QR code image
     img = cv2.imread(QR_CODE_PATH)
     if img is None:
