@@ -58,17 +58,34 @@ def ensure_db_schema():
 ensure_db_schema()
 
 
-def query_summary(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
+def parse_window(window: str):
+    now = datetime.now(timezone.utc).timestamp()
+    if isinstance(window, str) and window.startswith("range:"):
+        try:
+            _, s, e = window.split(":", 2)
+            start_ts = float(s)
+            end_ts = float(e)
+        except Exception:
+            end_ts = now
+            start_ts = end_ts - 3600
+    elif window.endswith("h"):
         hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
+        end_ts = now
+        start_ts = end_ts - hours * 3600
     elif window.endswith("d"):
         days = int(window[:-1])
-        start = now - timedelta(days=days)
+        end_ts = now
+        start_ts = end_ts - days * 86400
     else:
-        start = now - timedelta(hours=1)
-    since_ts = start.timestamp()
+        end_ts = now
+        start_ts = end_ts - 3600
+    span = max(0.0, end_ts - start_ts)
+    bucket_seconds = 60 if span <= 12 * 3600 else 300
+    return start_ts, end_ts, bucket_seconds
+
+
+def query_summary(window: str) -> Dict[str, Any]:
+    start_ts, end_ts, _ = parse_window(window)
 
     conn = get_db()
     cur = conn.cursor()
@@ -84,9 +101,9 @@ def query_summary(window: str) -> Dict[str, Any]:
             COALESCE(SUM(new_gender_unknown), 0) AS unknown_sum,
             COALESCE(SUM(processing_time_ms), 0) AS sum_processing_ms
         FROM analytics
-        WHERE ts >= ?
+        WHERE ts >= ? AND ts <= ?
         """,
-        (since_ts,),
+        (start_ts, end_ts),
     )
     row = cur.fetchone()
 
@@ -95,9 +112,9 @@ def query_summary(window: str) -> Dict[str, Any]:
         """
         SELECT COUNT(*)
         FROM presence_log
-        WHERE start_ts >= ?
+        WHERE start_ts >= ? AND start_ts <= ?
         """,
-        (since_ts,),
+        (start_ts, end_ts),
     )
     footfall_sessions = int((cur.fetchone() or [0])[0] or 0)
     # Fallback: if no presence sessions exist in the window, estimate arrivals from analytics for the window
@@ -106,9 +123,9 @@ def query_summary(window: str) -> Dict[str, Any]:
             """
             SELECT COALESCE(SUM(new_unique_persons), 0)
             FROM analytics
-            WHERE ts >= ?
+            WHERE ts >= ? AND ts <= ?
             """,
-            (since_ts,),
+            (start_ts, end_ts),
         )
         footfall_sessions = int((cur.fetchone() or [0])[0] or 0)
     conn.close()
@@ -120,7 +137,7 @@ def query_summary(window: str) -> Dict[str, Any]:
 
     return {
         "samples": samples,
-        "footfall": int(footfall_sessions or 0),
+        "footfall": int((row[3] or 0) + (row[4] or 0) + (row[5] or 0)),
         "faces": int(row[1] or 0),
         "unique_tracked_persons": int(row[2] or 0),
         "gender": {
@@ -134,19 +151,7 @@ def query_summary(window: str) -> Dict[str, Any]:
 
 
 def query_footfall_series(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
-        hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
-        bucket_seconds = 60
-    elif window.endswith("d"):
-        days = int(window[:-1])
-        start = now - timedelta(days=days)
-        bucket_seconds = 300
-    else:
-        start = now - timedelta(hours=1)
-        bucket_seconds = 60
-    since_ts = start.timestamp()
+    start_ts, end_ts, bucket_seconds = parse_window(window)
 
     conn = get_db()
     cur = conn.cursor()
@@ -157,11 +162,11 @@ def query_footfall_series(window: str) -> Dict[str, Any]:
             """
             SELECT CAST(start_ts / ? AS INTEGER) * ? AS bucket, COUNT(*) AS cnt
             FROM presence_log
-            WHERE start_ts >= ?
+            WHERE start_ts >= ? AND start_ts <= ?
             GROUP BY bucket
             ORDER BY bucket
             """,
-            (bucket_seconds, bucket_seconds, since_ts),
+            (bucket_seconds, bucket_seconds, start_ts, end_ts),
         )
         rows = cur.fetchall()
     except Exception:
@@ -172,11 +177,11 @@ def query_footfall_series(window: str) -> Dict[str, Any]:
             """
             SELECT CAST(ts / ? AS INTEGER) * ? AS bucket, COALESCE(SUM(new_unique_persons), 0) AS cnt
             FROM analytics
-            WHERE ts >= ?
+            WHERE ts >= ? AND ts <= ?
             GROUP BY bucket
             ORDER BY bucket
             """,
-            (bucket_seconds, bucket_seconds, since_ts),
+            (bucket_seconds, bucket_seconds, start_ts, end_ts),
         )
         rows = cur.fetchall()
     conn.close()
@@ -192,19 +197,7 @@ def query_footfall_series(window: str) -> Dict[str, Any]:
 
 
 def query_gender_series(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
-        hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
-        bucket_seconds = 60
-    elif window.endswith("d"):
-        days = int(window[:-1])
-        start = now - timedelta(days=days)
-        bucket_seconds = 300
-    else:
-        start = now - timedelta(hours=1)
-        bucket_seconds = 60
-    since_ts = start.timestamp()
+    start_ts, end_ts, bucket_seconds = parse_window(window)
 
     conn = get_db()
     cur = conn.cursor()
@@ -215,11 +208,11 @@ def query_gender_series(window: str) -> Dict[str, Any]:
                COALESCE(SUM(new_gender_female), 0) AS f,
                COALESCE(SUM(new_gender_unknown), 0) AS u
         FROM analytics
-        WHERE ts >= ?
+        WHERE ts >= ? AND ts <= ?
         GROUP BY bucket
         ORDER BY bucket
         """,
-        (bucket_seconds, bucket_seconds, since_ts),
+        (bucket_seconds, bucket_seconds, start_ts, end_ts),
     )
     rows = cur.fetchall()
     conn.close()
@@ -232,16 +225,7 @@ def query_gender_series(window: str) -> Dict[str, Any]:
 
 
 def query_age_summary(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
-        hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
-    elif window.endswith("d"):
-        days = int(window[:-1])
-        start = now - timedelta(days=days)
-    else:
-        start = now - timedelta(hours=1)
-    since_ts = start.timestamp()
+    start_ts, end_ts, _ = parse_window(window)
 
     conn = get_db()
     cur = conn.cursor()
@@ -253,9 +237,9 @@ def query_age_summary(window: str) -> Dict[str, Any]:
           SUM(CASE WHEN age > 40 THEN 1 ELSE 0 END) AS adult,
           SUM(CASE WHEN age IS NULL OR age < 0 THEN 1 ELSE 0 END) AS unknown
         FROM presence_log
-        WHERE end_ts >= ?
+        WHERE end_ts >= ? AND end_ts <= ?
         """,
-        (since_ts,),
+        (start_ts, end_ts),
     )
     row = cur.fetchone()
     conn.close()
@@ -268,16 +252,7 @@ def query_age_summary(window: str) -> Dict[str, Any]:
 
 
 def query_presence_summary(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
-        hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
-    elif window.endswith("d"):
-        days = int(window[:-1])
-        start = now - timedelta(days=days)
-    else:
-        start = now - timedelta(hours=1)
-    since_ts = start.timestamp()
+    start_ts, end_ts, _ = parse_window(window)
 
     conn = get_db()
     cur = conn.cursor()
@@ -286,9 +261,9 @@ def query_presence_summary(window: str) -> Dict[str, Any]:
         SELECT COALESCE(SUM(duration_sec), 0.0) AS total_sec,
                COUNT(*) AS sessions
         FROM presence_log
-        WHERE end_ts >= ?
+        WHERE end_ts >= ? AND end_ts <= ?
         """,
-        (since_ts,),
+        (start_ts, end_ts),
     )
     row = cur.fetchone()
 
@@ -296,12 +271,12 @@ def query_presence_summary(window: str) -> Dict[str, Any]:
         """
         SELECT track_id, COALESCE(SUM(duration_sec), 0.0) AS total_sec
         FROM presence_log
-        WHERE end_ts >= ?
+        WHERE end_ts >= ? AND end_ts <= ?
         GROUP BY track_id
         ORDER BY total_sec DESC
         LIMIT 5
         """,
-        (since_ts,),
+        (start_ts, end_ts),
     )
     top = [{"track_id": int(r[0]), "total_sec": float(r[1])} for r in cur.fetchall()]
     conn.close()
@@ -314,17 +289,7 @@ def query_presence_summary(window: str) -> Dict[str, Any]:
 
 
 def query_presence_stats(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
-        hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
-    elif window.endswith("d"):
-        days = int(window[:-1])
-        start = now - timedelta(days=days)
-    else:
-        start = now - timedelta(hours=1)
-    since_ts = start.timestamp()
-    now_ts = now.timestamp()
+    start_ts, end_ts, _ = parse_window(window)
 
     conn = get_db()
     cur = conn.cursor()
@@ -342,7 +307,7 @@ def query_presence_stats(window: str) -> Dict[str, Any]:
         FROM presence_log
         WHERE start_ts >= ? AND start_ts <= ?
         """,
-        (since_ts, now_ts),
+        (start_ts, end_ts),
     )
     bins_row = cur.fetchone()
     bins = [int(b or 0) for b in bins_row] if bins_row else [0, 0, 0, 0, 0, 0]
@@ -357,14 +322,12 @@ def query_presence_stats(window: str) -> Dict[str, Any]:
         GROUP BY hour
         ORDER BY hour
         """,
-        (since_ts, now_ts),
+        (start_ts, end_ts),
     )
     hour_rows = cur.fetchall()
     by_hour = [{"hour": int(h), "avg_sec": float(a or 0.0)} for (h, a) in hour_rows]
 
     # Rolling daily mean and 7-day moving average over the last 30 days
-    days_back = 30
-    start_rolling = now - timedelta(days=days_back)
     cur.execute(
         """
         SELECT DATE(datetime(start_ts, 'unixepoch')) AS d,
@@ -374,7 +337,7 @@ def query_presence_stats(window: str) -> Dict[str, Any]:
         GROUP BY d
         ORDER BY d
         """,
-        (start_rolling.timestamp(), now_ts),
+        (start_ts, end_ts),
     )
     daily_rows = cur.fetchall()
     conn.close()
@@ -403,16 +366,7 @@ def query_presence_stats(window: str) -> Dict[str, Any]:
     }
 
 def query_ad_stats(window: str) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
-    if window.endswith("h"):
-        hours = int(window[:-1])
-        start = now - timedelta(hours=hours)
-    elif window.endswith("d"):
-        days = int(window[:-1])
-        start = now - timedelta(days=days)
-    else:
-        start = now - timedelta(hours=1)
-    since_ts = start.timestamp()
+    start_ts, end_ts, _ = parse_window(window)
     # Sliding window for viewer counts (distinct tracks recently seen)
     viewer_window_sec = 30.0
 
@@ -429,10 +383,10 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
                    COALESCE(SUM(new_gender_female), 0) AS female,
                    COALESCE(SUM(new_gender_unknown), 0) AS unknown
             FROM analytics
-            WHERE ts >= ? AND ad_id IS NOT NULL AND ad_id <> ''
+            WHERE ts >= ? AND ts <= ? AND ad_id IS NOT NULL AND ad_id <> ''
             GROUP BY ad_id
             """,
-            (since_ts,)
+            (start_ts, end_ts)
         )
         rows = cur.fetchall()
     except Exception:
@@ -444,14 +398,15 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
                    COUNT(*) AS plays,
                    COALESCE(SUM(duration_sec), 0.0) AS total_sec
             FROM ad_plays
-            WHERE end_ts >= ?
+            WHERE end_ts >= ? AND end_ts <= ?
             GROUP BY ad_id
             """,
-            (since_ts,),
+            (start_ts, end_ts),
         )
         play_map = {r[0]: {"plays": int(r[1] or 0), "total_sec": float(r[2] or 0.0)} for r in cur.fetchall()}
     except Exception:
         play_map = {}
+
     conn.close()
 
     stats = []
@@ -475,10 +430,10 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
             """
             SELECT ad_id, COALESCE(SUM(new_unique_persons), 0) AS viewers
             FROM analytics
-            WHERE ts >= ? AND ad_id IS NOT NULL AND ad_id <> ''
+            WHERE ts >= ? AND ts <= ? AND ad_id IS NOT NULL AND ad_id <> ''
             GROUP BY ad_id
             """,
-            (since_ts,)
+            (start_ts, end_ts)
         )
         est = {r[0]: int(r[1] or 0) for r in cur.fetchall()}
         # Merge estimates where viewers are 0
@@ -649,6 +604,9 @@ HTML = """
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Camera Analytics -  Dashboard </title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css">
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
     <style>
       body { font-family: Arial, sans-serif; margin: 16px; background: #0f1116; color: #e6e6e6; }
       .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
@@ -680,21 +638,21 @@ HTML = """
       .chip-primary { background: rgba(75,209,255,0.15); color: #4bd1ff; border: 1px solid #2aa7d1; }
       .chip-male { background: rgba(75,209,255,0.12); color: #4bd1ff; border: 1px solid #2aa7d1; }
       .chip-female { background: rgba(255,111,177,0.12); color: #ff6fb1; border: 1px solid #d85593; }
-      .chip-unknown { background: rgba(154,164,178,0.12); color: #9aa4b2; border: 1px solid #7f8895; }
+      /* removed custom Undetected chip; using existing .chip-unknown */
+      .date-input { background: #0c0f16; color: #e6e6e6; border: 1px solid #2a2f3a; padding: 6px 10px; border-radius: 8px; width: 200px; transition: border-color 0.2s, box-shadow 0.2s; }
+      .date-input:focus { outline: none; border-color: #2aa7d1; box-shadow: 0 0 0 3px rgba(42,167,209,0.2); }
+      .flatpickr-calendar { background: #151823; border: 1px solid #222838; }
+      .flatpickr-day.selected, .flatpickr-day.startRange, .flatpickr-day.endRange { background: #2aa7d1; border-color: #2aa7d1; color: #fff; }
+      .flatpickr-day:hover { background: rgba(42,167,209,0.2); }
     </style>
   </head>
   <body>
     <div class="toolbar">
       <h1>Dual Dashboard (Live)</h1>
       <div style="display:flex;gap:8px;align-items:center;">
-        <label>Window:</label>
-        <select id="window">
-          <option value="1h" selected>Last 1h</option>
-          <option value="6h">Last 6h</option>
-          <option value="24h">Last 24h</option>
-          <option value="7d">Last 7d</option>
-        </select>
-        <!-- <button id="resetBtn" style="background:#c62828;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;">Reset Data</button> -->
+        <label>Range:</label>
+        <input id="dateRange" type="text" placeholder="Select range" class="date-input" style="width:280px;" />
+        <button id="applyRange" style="background:#2aa7d1;color:#fff;border:none;padding:6px 10px;border-radius:6px;cursor:pointer;">Apply</button>
       </div>
     </div>
     <!-- Row 1: Key metrics full width (12 columns equivalent) -->
@@ -703,7 +661,7 @@ HTML = """
         <h2>Key Metrics</h2>
         <div class="kpis">
           <div class="kpi"><div class="num" id="kpi-footfall">0</div><div class="label">Footfall</div></div>
-          <div class="kpi"><div class="num" id="kpi-avg">0</div><div class="label">Average Presence Time (s)</div></div>
+          <div class="kpi"><div class="num" id="kpi-avg">0</div><div class="label">Average Dwell Time (s)</div></div>
           <div class="kpi"><div class="num" id="kpi-fps">0</div><div class="label">System Speed (FPS)</div></div>
         </div>
       </div>
@@ -731,7 +689,7 @@ HTML = """
         <p class="note">Counts of  visitors detected in each time block.</p>
       </div>
       <div class="card">
-        <h2>Visit Length Distribution</h2>
+        <h2>Dwell Time Distribution</h2>
         <canvas id="presenceHist"></canvas>
         <p class="note">How many visits fall into each length band.</p>
       </div>
@@ -751,7 +709,12 @@ HTML = """
     </div>
 
     <script>
-      const wnd = document.getElementById('window');
+      const rangeInput = document.getElementById('dateRange');
+      const applyBtn = document.getElementById('applyRange');
+      let currentWindow = '1h';
+      const rangePicker = flatpickr(rangeInput, { mode: 'range', enableTime: false, dateFormat: 'Y-m-d', altInput: true, altFormat: 'M j, Y', maxDate: 'today', disableMobile: true });
+      function dayStart(d){ const x = new Date(d); x.setHours(0,0,0,0); return x; }
+      function dayEnd(d){ const x = new Date(d); x.setHours(23,59,59,999); return x; }
       let ws;
       let footfallChart, genderPieChart, agePieChart, presenceHistChart, hourTrendChart;
 
@@ -771,7 +734,7 @@ HTML = """
         if (!genderPieChart){
           genderPieChart = new Chart(document.getElementById('genderPie'), {
             type: 'pie',
-            data: { labels: ['Male', 'Female', 'Unknown'], datasets: [{ data: [0,0,0], backgroundColor: ['#4bd1ff','#ff6fb1','#9aa4b2'] }] },
+            data: { labels: ['Male', 'Female', 'Undetected'], datasets: [{ data: [0,0,0], backgroundColor: ['#4bd1ff','#ff6fb1','#9aa4b2'] }] },
             options: { plugins: { legend: { labels: { color: '#e6e6e6' } } } }
           });
         }
@@ -779,7 +742,7 @@ HTML = """
           agePieChart = new Chart(document.getElementById('agePie'), {
                 type: 'pie',
                 data: {
-                    labels: ['Child (0-15)', 'Young Adult (16-40)', 'Adult (41+)', 'Unknown'],
+                    labels: ['Child (0-15)', 'Young Adult (16-40)', 'Adult (41+)', 'Undetected'],
                     datasets: [{ data: [0,0,0,0], backgroundColor: ['#ffd54f','#4bd1ff','#a2ff6f','#9aa4b2'] }]
                 },
                 options: { plugins: { legend: { labels: { color: '#e6e6e6' } } } }
@@ -830,7 +793,7 @@ HTML = """
       agePieChart = new Chart(document.getElementById('agePie'), {
             type: 'pie',
             data: {
-                labels: ['Child (0-15)', 'Young Adult (16-40)', 'Adult (41+)', 'Unknown'],
+                labels: ['Child (0-15)', 'Young Adult (16-40)', 'Adult (41+)', 'Undetected'],
                 datasets: [{ data: [0,0,0,0], backgroundColor: ['#ffd54f','#4bd1ff','#a2ff6f','#9aa4b2'] }]
             },
             options: { plugins: { legend: { labels: { color: '#e6e6e6' } } } }
@@ -868,12 +831,12 @@ HTML = """
           const div = document.createElement('div');
           div.className = 'ad-card';
           div.innerHTML = `
-            <div class="ad-title">${item.ad_id || 'Unknown Ad'}</div>
+            <div class="ad-title">${item.ad_id || 'Undetected Ad'}</div>
             <div style="margin-bottom:8px;">
               <span class="chip chip-primary">Visitors: ${item.viewers||0}</span>
               <span class="chip chip-male">Male: ${item.male||0}</span>
               <span class="chip chip-female">Female: ${item.female||0}</span>
-              <span class="chip chip-unknown">Unknown: ${item.unknown||0}</span>
+              <span class="chip chip-unknown">Undetected: ${item.unknown||0}</span>
             </div>
             <div class="note">Plays: ${item.plays||0} • Total Time: ${fmtDuration(item.total_sec||0)}</div>
           `;
@@ -885,6 +848,11 @@ HTML = """
         ensureCharts();
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         ws = new WebSocket(`${proto}://${location.host}/ws`);
+        ws.onopen = () => {
+          try {
+            ws.send(JSON.stringify({ type: 'set_window', window: currentWindow }));
+          } catch (_) {}
+        };
         ws.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
@@ -908,17 +876,38 @@ HTML = """
         ws.onclose = () => setTimeout(connect, 1000);
       }
 
-      wnd.addEventListener('change', () => {
-        const v = wnd.value;
-        ws && ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'set_window', window: v }));
+      function setDefaultRange(){
+        const today = new Date();
+        const start = dayStart(today);
+        const end = dayEnd(today);
+        rangePicker.setDate([start, end], true);
+        const sTs = Math.floor(start.getTime()/1000);
+        const nowTs = Math.floor(Date.now()/1000);
+        const eTs = Math.min(Math.floor(end.getTime()/1000), nowTs);
+        currentWindow = `range:${sTs}:${eTs}`;
+      }
+
+      applyBtn.addEventListener('click', () => {
+        try {
+          const dates = rangePicker.selectedDates || [];
+          const sDate = dates[0];
+          const eDate = dates[1] || dates[0];
+          if (!sDate) return;
+          const sTs = Math.floor(dayStart(sDate).getTime()/1000);
+          const nowTs = Math.floor(Date.now()/1000);
+          const eTs = Math.min(Math.floor(dayEnd(eDate).getTime()/1000), nowTs);
+          if (isNaN(sTs) || isNaN(eTs) || eTs <= sTs) return;
+          currentWindow = `range:${sTs}:${eTs}`;
+          ws && ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'set_window', window: currentWindow }));
+          refreshAds();
+        } catch (_) {}
       });
 
       // Dummy actions removed per request
 
       async function refreshAds(){
         try {
-          const w = wnd.value;
-          const ads = await fetch(`/api/ad_stats?window=${w}`);
+          const ads = await fetch(`/api/ad_stats?window=${encodeURIComponent(currentWindow)}`);
           const list = (await ads.json()).stats||[];
           renderAdStats(list);
           const cur = await fetch(`/api/current_ad`);
@@ -937,6 +926,7 @@ HTML = """
         } catch (_) {}
       } */
 
+      setDefaultRange();
       setInterval(refreshAds, 3000);
       refreshAds();
 
