@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Camera Analytics - Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css">
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #0a0e17;
+            color: #e6e6e6;
+            overflow-x: hidden;
+            padding: 0;
+        }
+
+        .header {
+            background: #0f1419;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #1a1f2e;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #4bd1ff;
+        }
+
+        .date-controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .date-controls label {
+            font-size: 13px;
+            color: #9aa4b2;
+        }
+
+        .date-input {
+            background: #151b26;
+            color: #e6e6e6;
+            border: 1px solid #2a2f3a;
+            padding: 8px 12px;
+            border-radius: 6px;
+            min-width: 220px;
+            font-size: 13px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        .kpi-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .kpi-card {
+            background: #0f1419;
+            border: 1px solid #1a1f2e;
+            border-radius: 8px;
+            padding: 20px;
+        }
+
+        .kpi-value {
+            font-size: 40px;
+            font-weight: 700;
+            color: #4bd1ff;
+            margin-bottom: 8px;
+        }
+
+        .kpi-label {
+            font-size: 13px;
+            color: #9aa4b2;
+            font-weight: 400;
+        }
+
+        .chart-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .chart-card {
+            background: #0f1419;
+            border: 1px solid #1a1f2e;
+            border-radius: 8px;
+            padding: 24px;
+        }
+
+        .chart-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 20px;
+        }
+
+        .chart-row-2 {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .chart-row-3 {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        canvas {
+            max-height: 260px !important;
+            width: 100% !important;
+        }
+
+        .canvas-tall {
+            max-height: 400px !important;
+        }
+
+        .ad-section {
+            background: #0f1419;
+            border: 1px solid #1a1f2e;
+            border-radius: 8px;
+            padding: 24px;
+        }
+
+        .ad-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .ad-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #ffffff;
+        }
+
+        .current-ad {
+            font-size: 12px;
+            color: #9aa4b2;
+        }
+
+        .ad-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px;
+        }
+
+        .ad-card {
+            background: #151b26;
+            border: 1px solid #1a1f2e;
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .ad-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #4bd1ff;
+            margin-bottom: 12px;
+        }
+
+        .ad-stats {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .chip {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .chip-primary {
+            background: rgba(75, 209, 255, 0.15);
+            color: #4bd1ff;
+            border: 1px solid rgba(75, 209, 255, 0.3);
+        }
+
+        .chip-male {
+            background: rgba(75, 209, 255, 0.12);
+            color: #4bd1ff;
+            border: 1px solid rgba(75, 209, 255, 0.25);
+        }
+
+        .chip-female {
+            background: rgba(255, 111, 177, 0.12);
+            color: #ff6fb1;
+            border: 1px solid rgba(255, 111, 177, 0.25);
+        }
+
+        .chip-unknown {
+            background: rgba(154, 164, 178, 0.12);
+            color: #9aa4b2;
+            border: 1px solid rgba(154, 164, 178, 0.25);
+        }
+
+        .ad-meta {
+            font-size: 11px;
+            color: #6a7483;
+        }
+
+        .flatpickr-calendar {
+            background: #151b26;
+            border: 1px solid #2a2f3a;
+        }
+
+        .flatpickr-day.selected,
+        .flatpickr-day.startRange,
+        .flatpickr-day.endRange {
+            background: #2aa7d1;
+            border-color: #2aa7d1;
+        }
+
+        @media (max-width: 1200px) {
+            .chart-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .kpi-row {
+                grid-template-columns: 1fr;
+            }
+
+            .chart-row-2 {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Header -->
+    <div class="header">
+        <h1>Dual Dashboard</h1>
+        <div class="date-controls">
+            <label>Date Range:</label>
+            <input id="dateRange" type="text" class="date-input" placeholder="Select date range" />
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- KPI Row -->
+        <div class="kpi-row">
+            <div class="kpi-card">
+                <div class="kpi-value" id="kpi-footfall">0</div>
+                <div class="kpi-label">Total Visitors</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value" id="kpi-avg">0s</div>
+                <div class="kpi-label">Avg Dwell Time</div>
+            </div>
+            <div class="kpi-card">
+                <div class="kpi-value" id="kpi-fps">0</div>
+                <div class="kpi-label">System FPS</div>
+            </div>
+        </div>
+
+        <!-- Row 1: Traffic Overview + Gender Demographics -->
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3 class="chart-title">Traffic Overview</h3>
+                <canvas id="footfallLine"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3 class="chart-title">Gender Demographics</h3>
+                <canvas id="genderPie"></canvas>
+            </div>
+        </div>
+
+        <!-- Row 2: Peak Hours + Age Groups -->
+        <div class="chart-grid">
+            <div class="chart-card">
+                <h3 class="chart-title">Peak Hours</h3>
+                <canvas id="hourTrend"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3 class="chart-title">Age Groups</h3>
+                <canvas id="agePie"></canvas>
+            </div>
+        </div>
+
+        <div class="chart-row-2">
+            <div class="chart-card">
+                <h3 class="chart-title">Visit Duration</h3>
+                <canvas id="presenceHist"></canvas>
+            </div>
+            <!-- Ad Performance -->
+        <div class="ad-section">
+            <div class="ad-header">
+                <h2>Ad Performance</h2>
+                <div class="current-ad" id="currentAd">Current Ad: —</div>
+            </div>
+            <div class="ad-grid" id="adGrid"></div>
+        </div>
+        </div>
+
+        
+    </div>
+
+    <script>
+        const rangeInput = document.getElementById('dateRange');
+        let currentWindow = '1h';
+
+        const rangePicker = flatpickr(rangeInput, {
+            mode: 'range',
+            enableTime: false,
+            dateFormat: 'Y-m-d',
+            maxDate: 'today',
+            disableMobile: true,
+            defaultDate: [new Date(), new Date()],
+            onChange: function (selectedDates, dateStr, instance) {
+                if (selectedDates.length === 2) {
+                    applyDateRange(selectedDates);
+                }
+            }
+        });
+
+        function dayStart(d) {
+            const x = new Date(d);
+            x.setHours(0, 0, 0, 0);
+            return x;
+        }
+
+        function dayEnd(d) {
+            const x = new Date(d);
+            x.setHours(23, 59, 59, 999);
+            return x;
+        }
+
+        let ws;
+        let footfallChart, genderPieChart, agePieChart, presenceHistChart, hourTrendChart;
+
+        function fmtTs(t) {
+            const d = new Date(t * 1000);
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function applyDateRange(selectedDates) {
+            try {
+                const sDate = selectedDates[0];
+                const eDate = selectedDates[1];
+                if (!sDate || !eDate) return;
+
+                const sTs = Math.floor(dayStart(sDate).getTime() / 1000);
+                const nowTs = Math.floor(Date.now() / 1000);
+                const eTs = Math.min(Math.floor(dayEnd(eDate).getTime() / 1000), nowTs);
+                if (isNaN(sTs) || isNaN(eTs) || eTs <= sTs) return;
+
+                currentWindow = `range:${sTs}:${eTs}`;
+                ws && ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify({ type: 'set_window', window: currentWindow }));
+                refreshAds();
+            } catch (_) { }
+        }
+
+        function ensureCharts() {
+            // Set global Chart.js defaults for dark theme
+            Chart.defaults.color = '#ffffff';
+            Chart.defaults.font.size = 12;
+            Chart.defaults.font.family = "'Segoe UI', Tahoma, Geneva, Verdana, sans-serif";
+            Chart.defaults.borderColor = '#1a1f2e';
+
+            // Ensure legend labels are white
+            if (!Chart.defaults.plugins) Chart.defaults.plugins = {};
+            if (!Chart.defaults.plugins.legend) Chart.defaults.plugins.legend = {};
+            if (!Chart.defaults.plugins.legend.labels) Chart.defaults.plugins.legend.labels = {};
+            Chart.defaults.plugins.legend.labels.color = '#ffffff';
+
+            if (!footfallChart) {
+                footfallChart = new Chart(document.getElementById('footfallLine'), {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Visitors',
+                            data: [],
+                            borderColor: '#4bd1ff',
+                            backgroundColor: 'rgba(75,209,255,0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                                padding: 12,
+                                displayColors: false
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#ffffff', font: { size: 11 } },
+                                grid: { color: '#1a1f2e' }
+                            },
+                            y: {
+                                ticks: { color: '#ffffff', font: { size: 11 } },
+                                grid: { color: '#1a1f2e' },
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (!genderPieChart) {
+                genderPieChart = new Chart(document.getElementById('genderPie'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Male', 'Female', 'Unpredicted'],
+                        datasets: [{
+                            data: [0, 0, 0],
+                            backgroundColor: ['#4bd1ff', '#ff6fb1', '#6a7483'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        cutout: '70%',
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#e6e6e6',
+                                    font: { size: 13, weight: '500' },
+                                    padding: 15,
+                                    usePointStyle: true,
+                                    pointStyle: 'circle',
+                                    generateLabels: function (chart) {
+                                        const data = chart.data;
+                                        if (data.labels.length && data.datasets.length) {
+                                            const dataset = data.datasets[0];
+                                            const total = dataset.data.reduce((a, b) => a + b, 0);
+                                            return data.labels.map((label, i) => {
+                                                const value = dataset.data[i];
+                                                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                                return {
+                                                    text: `${label}: ${percentage}%`,
+                                                    fillStyle: dataset.backgroundColor[i],
+                                                    strokeStyle: dataset.backgroundColor[i],
+                                                    fontColor: '#e6e6e6',
+                                                    hidden: false,
+                                                    index: i
+                                                };
+                                            });
+                                        }
+                                        return [];
+                                    }
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                                padding: 12,
+                                titleColor: '#e6e6e6',
+                                bodyColor: '#e6e6e6',
+                                callbacks: {
+                                    label: function (context) {
+                                        const label = context.label || '';
+                                        const value = context.parsed || 0;
+                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                        const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                        return `${label}: ${value} (${percentage}%)`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (!agePieChart) {
+                agePieChart = new Chart(document.getElementById('agePie'), {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Child (0-15)', 'Young Adult (16-40)', 'Adult (41+)', 'Unpredicted'],
+                        datasets: [{
+                            data: [0, 0, 0, 0],
+                            backgroundColor: ['#ffd54f', '#4bd1ff', '#a2ff6f', '#6a7483'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        cutout: '70%',
+                        plugins: {
+                            legend: {
+                                display: true,
+                                position: 'bottom',
+                                labels: {
+                                    color: '#e6e6e6',
+                                    font: { size: 13, weight: '500' },
+                                    padding: 15,
+                                    usePointStyle: true,
+                                    pointStyle: 'circle',
+                                    generateLabels: function (chart) {
+                                        const data = chart.data;
+                                        if (data.labels.length && data.datasets.length) {
+                                            const dataset = data.datasets[0];
+                                            const total = dataset.data.reduce((a, b) => a + b, 0);
+                                            return data.labels.map((label, i) => {
+                                                const value = dataset.data[i];
+                                                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                                return {
+                                                    text: `${label}: ${percentage}%`,
+                                                    fillStyle: dataset.backgroundColor[i],
+                                                    strokeStyle: dataset.backgroundColor[i],
+                                                    fontColor: '#e6e6e6',
+                                                    hidden: false,
+                                                    index: i
+                                                };
+                                            });
+                                        }
+                                        return [];
+                                    }
+                                }
+                            },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                                padding: 12,
+                                titleColor: '#e6e6e6',
+                                bodyColor: '#e6e6e6',
+                                callbacks: {
+                                    label: function (context) {
+                                        const label = context.label || '';
+                                        const value = context.parsed || 0;
+                                        const total = context.dataset.data.reduce((a, b) => a + b, 0);
+                                        const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                                        return `${label}: ${value} (${percentage}%)`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (!presenceHistChart) {
+                presenceHistChart = new Chart(document.getElementById('presenceHist'), {
+                    type: 'bar',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Visits',
+                            data: [],
+                            backgroundColor: '#4bd1ff',
+                            borderWidth: 0,
+                            borderRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                                padding: 12
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#ffffff', font: { size: 11 } },
+                                grid: { display: false }
+                            },
+                            y: {
+                                ticks: { color: '#ffffff', font: { size: 11 } },
+                                grid: { color: '#1a1f2e' },
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+            }
+
+            if (!hourTrendChart) {
+                hourTrendChart = new Chart(document.getElementById('hourTrend'), {
+                    type: 'line',
+                    data: {
+                        labels: [],
+                        datasets: [{
+                            label: 'Avg Time',
+                            data: [],
+                            borderColor: '#a2ff6f',
+                            backgroundColor: 'rgba(162,255,111,0.1)',
+                            fill: true,
+                            tension: 0.4,
+                            borderWidth: 2,
+                            pointRadius: 0,
+                            pointHoverRadius: 4
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                backgroundColor: 'rgba(0, 0, 0, 0.9)',
+                                padding: 12,
+                                displayColors: false
+                            }
+                        },
+                        scales: {
+                            x: {
+                                ticks: { color: '#ffffff', font: { size: 11 } },
+                                grid: { color: '#1a1f2e' }
+                            },
+                            y: {
+                                ticks: { color: '#ffffff', font: { size: 11 } },
+                                grid: { color: '#1a1f2e' },
+                                beginAtZero: true
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        function renderAgePie(a) {
+            const vals = [a.child || 0, a.young_adult || 0, a.adult || 0, a.unknown || 0];
+            agePieChart.data.datasets[0].data = vals;
+            agePieChart.update();
+        }
+
+        function updateKPIs(sum, presence) {
+            const total = Math.round(presence.total_presence_sec || 0);
+            const sessions = Math.round(presence.sessions || 0);
+            const avg = sessions > 0 ? Math.round(total / sessions) : 0;
+            document.getElementById('kpi-footfall').textContent = sum.footfall || 0;
+            document.getElementById('kpi-avg').textContent = avg + 's';
+            document.getElementById('kpi-fps').textContent = (sum.estimated_fps || 0).toFixed(1);
+        }
+
+        function renderFootfall(series) {
+            const labels = series.map(p => fmtTs(p.t));
+            const data = series.map(p => p.count);
+            footfallChart.data.labels = labels;
+            footfallChart.data.datasets[0].data = data;
+            footfallChart.update();
+        }
+
+        function renderGenderPie(g) {
+            genderPieChart.data.datasets[0].data = [g.male || 0, g.female || 0, g.unknown || 0];
+            genderPieChart.update();
+        }
+
+        function renderPresenceStats(stats) {
+            const labels = (stats.histogram && stats.histogram.labels) || [];
+            const bins = (stats.histogram && stats.histogram.bins) || [];
+            presenceHistChart.data.labels = labels;
+            presenceHistChart.data.datasets[0].data = bins;
+            presenceHistChart.update();
+
+            const hours = (stats.by_hour || []).map(h => h.hour);
+            const hourData = (stats.by_hour || []).map(h => (h.avg_sec || 0));
+            hourTrendChart.data.labels = hours.map(h => `${h}:00`);
+            hourTrendChart.data.datasets[0].data = hourData;
+            hourTrendChart.update();
+        }
+
+        function fmtDuration(sec) {
+            const s = Math.round(sec || 0);
+            const m = Math.floor(s / 60);
+            const r = s % 60;
+            return `${m}m ${r}s`;
+        }
+
+        function renderAdStats(list) {
+            const grid = document.getElementById('adGrid');
+            grid.innerHTML = '';
+            (list || []).forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'ad-card';
+                div.innerHTML = `
+            <div class="ad-title">${item.ad_id || 'Unknown Ad'}</div>
+            <div class="ad-stats">
+              <span class="chip chip-primary">Visitors: ${item.viewers || 0}</span>
+              <span class="chip chip-male">M: ${item.male || 0}</span>
+              <span class="chip chip-female">F: ${item.female || 0}</span>
+              <span class="chip chip-unknown">U: ${item.unknown || 0}</span>
+            </div>
+            <div class="ad-meta">Plays: ${item.plays || 0} • ${fmtDuration(item.total_sec || 0)}</div>
+          `;
+                grid.appendChild(div);
+            });
+        }
+
+        function connect() {
+            ensureCharts();
+            const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${proto}://${location.host}/ws`);
+            ws.onopen = () => {
+                try {
+                    ws.send(JSON.stringify({ type: 'set_window', window: currentWindow }));
+                } catch (_) { }
+            };
+            ws.onmessage = (ev) => {
+                try {
+                    const msg = JSON.parse(ev.data);
+                    if (msg.type === 'snapshot' || msg.type === 'update') {
+                        updateKPIs(msg.summary, msg.presence);
+                        renderFootfall(msg.footfall.series || []);
+                        const gsum = msg.summary.gender || { male: 0, female: 0, unknown: 0 };
+                        renderGenderPie(gsum);
+                        if (msg.age) {
+                            renderAgePie(msg.age);
+                        }
+                        if (msg.presence_stats) {
+                            renderPresenceStats(msg.presence_stats);
+                        }
+                    } else if (msg.type === 'ad_changed') {
+                        refreshAds();
+                    }
+                } catch (_) { }
+            };
+            ws.onclose = () => setTimeout(connect, 1000);
+        }
+
+        function setDefaultRange() {
+            const today = new Date();
+            const start = dayStart(today);
+            const end = dayEnd(today);
+            rangePicker.setDate([start, end], true);
+            const sTs = Math.floor(start.getTime() / 1000);
+            const nowTs = Math.floor(Date.now() / 1000);
+            const eTs = Math.min(Math.floor(end.getTime() / 1000), nowTs);
+            currentWindow = `range:${sTs}:${eTs}`;
+        }
+
+        async function refreshAds() {
+            try {
+                const ads = await fetch(`/api/ad_stats?window=${encodeURIComponent(currentWindow)}`);
+                const list = (await ads.json()).stats || [];
+                renderAdStats(list);
+                const cur = await fetch(`/api/current_ad`);
+                const curJ = await cur.json();
+                document.getElementById('currentAd').textContent = `Current Ad: ${curJ.ad_id || '—'}`;
+            } catch (_) { }
+        }
+
+        setDefaultRange();
+        setInterval(refreshAds, 3000);
+        refreshAds();
+        connect();
+    </script>
+</body>
+
+</html>
