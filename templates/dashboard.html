@@ -162,31 +162,25 @@
             color: #9aa4b2;
         }
 
-        .ad-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 16px;
+        .ad-table {
+            width: 100%;
+            border-collapse: collapse;
         }
-
-        .ad-card {
+        .ad-table thead th {
+            text-align: left;
+            font-size: 12px;
+            color: #9aa4b2;
+            padding: 10px 12px;
+            border-bottom: 1px solid #1a1f2e;
             background: #151b26;
-            border: 1px solid #1a1f2e;
-            border-radius: 8px;
-            padding: 16px;
         }
-
-        .ad-title {
-            font-size: 14px;
-            font-weight: 600;
-            color: #4bd1ff;
-            margin-bottom: 12px;
+        .ad-table tbody td {
+            padding: 12px;
+            border-bottom: 1px solid #1a1f2e;
+            font-size: 13px;
         }
-
-        .ad-stats {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 10px;
+        .ad-table tbody tr:hover {
+            background: rgba(26, 31, 46, 0.6);
         }
 
         .chip {
@@ -318,7 +312,20 @@
                 <h2>Ad Performance</h2>
                 <div class="current-ad" id="currentAd">Current Ad: —</div>
             </div>
-            <div class="ad-grid" id="adGrid"></div>
+            <table class="ad-table">
+                <thead>
+                    <tr>
+                        <th>Ad</th>
+                        <th>Visitors</th>
+                        <th>M</th>
+                        <th>F</th>
+                        <th>U</th>
+                        <th>Plays</th>
+                        <th>Total Time</th>
+                    </tr>
+                </thead>
+                <tbody id="adTableBody"></tbody>
+            </table>
         </div>
         </div>
 
@@ -702,22 +709,20 @@
         }
 
         function renderAdStats(list) {
-            const grid = document.getElementById('adGrid');
-            grid.innerHTML = '';
+            const tbody = document.getElementById('adTableBody');
+            tbody.innerHTML = '';
             (list || []).forEach(item => {
-                const div = document.createElement('div');
-                div.className = 'ad-card';
-                div.innerHTML = `
-            <div class="ad-title">${item.ad_id || 'Unknown Ad'}</div>
-            <div class="ad-stats">
-              <span class="chip chip-primary">Visitors: ${item.viewers || 0}</span>
-              <span class="chip chip-male">M: ${item.male || 0}</span>
-              <span class="chip chip-female">F: ${item.female || 0}</span>
-              <span class="chip chip-unknown">U: ${item.unknown || 0}</span>
-            </div>
-            <div class="ad-meta">Plays: ${item.plays || 0} • ${fmtDuration(item.total_sec || 0)}</div>
-          `;
-                grid.appendChild(div);
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td><span class="ad-title">${item.ad_id || 'Unknown Ad'}</span></td>
+                    <td><span class="chip chip-primary">${item.viewers || 0}</span></td>
+                    <td><span class="chip chip-male">${item.male || 0}</span></td>
+                    <td><span class="chip chip-female">${item.female || 0}</span></td>
+                    <td><span class="chip chip-unknown">${item.unknown || 0}</span></td>
+                    <td>${item.plays || 0}</td>
+                    <td>${fmtDuration(item.total_sec || 0)}</td>
+                `;
+                tbody.appendChild(tr);
             });
         }
 
