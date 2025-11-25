@@ -13,7 +13,12 @@ import timm
 from mivolo.model.mivolo_model import *  # noqa: F403, F401
 from timm.layers import set_layer_config
 from timm.models._factory import parse_model_name
-from timm.models._helpers import load_state_dict, remap_checkpoint
+try:
+    from timm.models._helpers import load_state_dict, remap_checkpoint
+except Exception:
+    from timm.models._helpers import load_checkpoint as load_state_dict
+    def remap_checkpoint(model, state_dict):
+        return state_dict
 from timm.models._hub import load_model_config_from_hf
 from timm.models._pretrained import PretrainedCfg, split_model_name_tag
 from timm.models._registry import is_model, model_entrypoint

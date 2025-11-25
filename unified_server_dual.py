@@ -18,6 +18,11 @@ import time
 import torch
 from collections import deque
 from typing import Dict, Optional, Tuple, List, Any
+try:
+    import requests
+except Exception:
+    requests = None
+import os
 
 # ----------  speed tweaks  ----------
 torch.set_grad_enabled(False)
@@ -43,6 +48,13 @@ class MivoloEngine(BaseEngine):
         from ultralytics import YOLO
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = device
+        self._ultra_device = "cuda:0" if device == "cuda" else "cpu"
+        try:
+            name = torch.cuda.get_device_name(0) if device == "cuda" else "cpu"
+        except Exception:
+            name = "cpu"
+        print(f"[GPU] torch_cuda={torch.cuda.is_available()} cuda_ver={getattr(torch.version, 'cuda', None)} device={self._ultra_device} name={name}")
 
         class Config:
             def __init__(self, **entries):
@@ -67,6 +79,11 @@ class MivoloEngine(BaseEngine):
 
         # lightweight tracker
         self._tracker = YOLO("yolo11n.pt")
+        try:
+            self._tracker.to(self._ultra_device)
+        except Exception:
+            pass
+        print(f"[GPU] YOLO tracker device={self._ultra_device}")
 
         # -----------  preview  -------------
         self._show_preview = False
@@ -183,7 +200,14 @@ class MivoloEngine(BaseEngine):
         # ----------  tracking + ID + gender + AGE + presence  ----------
         try:
             pre_seen_ids = set(self._seen_track_id_to_gender.keys())
-            tr_results = self._tracker.track(frame_bgr, persist=True, conf=0.6, classes=[0], verbose=False)
+            tr_results = self._tracker.track(
+                frame_bgr,
+                persist=True,
+                conf=0.6,
+                classes=[0],
+                verbose=False,
+                device=self._ultra_device,
+            )
             tr_boxes = tr_results[0].boxes if tr_results and len(tr_results) > 0 else None
             cur_ids: List[int] = []
             frame_track_gender: Dict[int, str] = {}
@@ -291,6 +315,7 @@ class MivoloEngine(BaseEngine):
                         "start_ts": float(start_ts),
                         "end_ts": float(last),
                         "duration_sec": float(duration),
+                        "age": self._seen_track_id_to_age.get(tid)
                     })
                     to_delete.append(tid)
             for tid in to_delete:
@@ -438,6 +463,9 @@ class UnifiedServer:
         self._db.row_factory = sqlite3.Row
         self._db_lock = asyncio.Lock()
         self._init_db()
+        # batching state
+        self._current_ad_id: Optional[str] = None
+        self._batch: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     def _init_db(self):
@@ -577,7 +605,29 @@ class UnifiedServer:
                 cur.execute("DELETE FROM recent_tracks WHERE last_ts < ?", (now_ts - 120.0,))
             except Exception:
                 pass
-            self._db.commit()
+        self._db.commit()
+
+    async def _flush_batch(self):
+        prev_ad = self._current_ad_id
+        if not self._batch:
+            return
+        items = list(self._batch)
+        self._batch.clear()
+        if requests:
+            url = os.environ.get("DASHBOARD_INGEST_BULK_URL", os.environ.get("DASHBOARD_INGEST_URL", "http://127.0.0.1:8000/api/ingest_bulk"))
+            try:
+                print(f"[INGEST] flushing HTTP bulk ad={prev_ad} count={len(items)} url={url}")
+                resp = requests.post(url, json={"ad_id": prev_ad, "analytics_list": items}, timeout=5.0)
+                print(f"[INGEST] bulk response status={getattr(resp, 'status_code', None)}")
+                return
+            except Exception as e:
+                print(f"[INGEST] bulk HTTP failed: {e}")
+        for analytics in items:
+            try:
+                print(f"[INGEST] fallback local save ad={prev_ad}")
+                await self._save_analytics(prev_ad, analytics)
+            except Exception as e:
+                print(f"[INGEST] local save failed: {e}")
 
     # ------------------------------------------------------------------
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -607,13 +657,31 @@ class UnifiedServer:
                     payload["ad_id"] = ad_id
                 await write_response(writer, payload)
 
-                # persist (best-effort)
+                # batching: append and flush on ad change
                 try:
-                    await self._save_analytics(ad_id, analytics)
+                    # initialize current ad on first frame
+                    if self._current_ad_id is None:
+                        self._current_ad_id = ad_id
+                    # if ad changes, flush previous batch
+                    if ad_id != self._current_ad_id:
+                        print(f"[INGEST] ad changed prev={self._current_ad_id} new={ad_id}")
+                        await self._flush_batch()
+                        self._current_ad_id = ad_id
+                    # append current analytics to batch
+                    self._batch.append(analytics)
+                    print(f"[INGEST] queued ad={ad_id} ts={analytics.get('timestamp')} batch_size={len(self._batch)}")
+                    # safety: flush if batch grows too large
+                    if len(self._batch) >= 500:
+                        await self._flush_batch()
                 except Exception:
                     pass
         finally:
             try:
+                # flush any remaining batch when connection closes
+                try:
+                    await self._flush_batch()
+                except Exception:
+                    pass
                 writer.close()
                 await writer.wait_closed()
             except Exception:
@@ -644,3 +712,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[Server] Shut-down requested")
+            

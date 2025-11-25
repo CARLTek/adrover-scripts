@@ -1,0 +1,12 @@
+# torch
+# torchvision
+# torchaudio
+#  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+ultralytics
+opencv-python
+numpy
+timm==0.8.13.dev0
+omegaconf
+huggingface_hub
+lapx>=0.5.2
+requests

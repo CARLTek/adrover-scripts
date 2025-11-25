@@ -38,7 +38,6 @@ def get_db():
     return conn
 
 def ensure_db_schema():
-    """Ensure auxiliary tables used by the dashboard exist."""
     conn = get_db()
     try:
         cur = conn.cursor()
@@ -50,6 +49,51 @@ def ensure_db_schema():
                 start_ts REAL NOT NULL,
                 end_ts REAL,
                 duration_sec REAL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS analytics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                ad_id TEXT,
+                processing_time_ms REAL,
+                total_persons INTEGER,
+                total_faces INTEGER,
+                current_tracked_persons INTEGER,
+                unique_tracked_persons INTEGER,
+                gender_male INTEGER,
+                gender_female INTEGER,
+                gender_unknown INTEGER,
+                new_unique_persons INTEGER,
+                new_unique_faces INTEGER,
+                new_gender_male INTEGER,
+                new_gender_female INTEGER,
+                new_gender_unknown INTEGER
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS presence_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                track_id INTEGER,
+                ad_id TEXT,
+                start_ts REAL NOT NULL,
+                end_ts REAL NOT NULL,
+                duration_sec REAL NOT NULL,
+                age REAL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recent_tracks (
+                track_id INTEGER NOT NULL,
+                ad_id TEXT,
+                last_ts REAL NOT NULL,
+                PRIMARY KEY(track_id, ad_id)
             )
             """
         )
@@ -131,6 +175,16 @@ def query_summary(window: str) -> Dict[str, Any]:
             (start_ts, end_ts),
         )
         footfall_sessions = int((cur.fetchone() or [0])[0] or 0)
+    # Count ad plays in the selected window
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM ad_plays
+        WHERE end_ts >= ? AND end_ts <= ?
+        """,
+        (start_ts, end_ts),
+    )
+    ad_plays_count = int((cur.fetchone() or [0])[0] or 0)
     conn.close()
 
     samples = int(row[0] or 0)
@@ -150,6 +204,7 @@ def query_summary(window: str) -> Dict[str, Any]:
         },
         "avg_processing_ms": avg_ms,
         "estimated_fps": est_fps,
+        "ad_plays": ad_plays_count,
     }
 
 
@@ -523,6 +578,7 @@ async def websocket_endpoint(ws: WebSocket):
             "presence_stats": query_presence_stats(window),
             "window": window,
         }
+        print(f"[WS] send snapshot window={window} summary_samples={payload['summary'].get('samples')} footfall={payload['summary'].get('footfall')}")
         await ws.send_json(payload)
 
         # Listen for window change from client and periodically push updates
@@ -538,6 +594,10 @@ async def websocket_endpoint(ws: WebSocket):
                     "presence": query_presence_summary(window),
                     "presence_stats": query_presence_stats(window),
                 }
+                try:
+                    print(f"[WS] send update window={window} summary_samples={upd['summary'].get('samples')} footfall={upd['summary'].get('footfall')}")
+                except Exception:
+                    pass
                 await ws.send_json(upd)
 
         sender_task = asyncio.create_task(sender())
@@ -578,3 +638,125 @@ async def api_notify_ad_change():
         with contextlib.suppress(Exception):
             _ws_clients.discard(d)
     return {"status": "ok"}
+@app.post("/api/ingest")
+async def api_ingest(payload: Dict[str, Any]):
+    ad_id = payload.get("ad_id")
+    analytics = payload.get("analytics") or {}
+    tg = analytics.get("tracked_gender_counts") or {}
+    ng = analytics.get("new_gender_counts") or {}
+    ts = float(analytics.get("timestamp") or datetime.now(timezone.utc).timestamp())
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        print(f"[API] ingest single ad={ad_id} ts={ts} events={len(analytics.get('presence_events') or [])}")
+        cur.execute(
+            """
+            INSERT INTO analytics (
+                ts, ad_id, processing_time_ms, total_persons, total_faces,
+                current_tracked_persons, unique_tracked_persons,
+                gender_male, gender_female, gender_unknown,
+                new_unique_persons, new_unique_faces,
+                new_gender_male, new_gender_female, new_gender_unknown
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                ad_id,
+                float(analytics.get("processing_time_ms") or 0.0),
+                int(analytics.get("total_persons") or 0),
+                int(analytics.get("total_faces") or 0),
+                int(analytics.get("current_tracked_persons") or 0),
+                int(analytics.get("unique_tracked_persons") or 0),
+                int(tg.get("male") or 0),
+                int(tg.get("female") or 0),
+                int(tg.get("unknown") or 0),
+                int(analytics.get("new_unique_persons") or 0),
+                int(analytics.get("new_unique_faces") or 0),
+                int(ng.get("male") or 0),
+                int(ng.get("female") or 0),
+                int(ng.get("unknown") or 0),
+            ),
+        )
+        for ev in analytics.get("presence_events") or []:
+            cur.execute(
+                """
+                INSERT INTO presence_log (track_id, ad_id, start_ts, end_ts, duration_sec, age)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(ev.get("track_id") or 0),
+                    ad_id,
+                    float(ev.get("start_ts") or 0.0),
+                    float(ev.get("end_ts") or 0.0),
+                    float(ev.get("duration_sec") or 0.0),
+                    float(ev.get("age")) if ev.get("age") is not None else None,
+                ),
+            )
+        conn.commit()
+        print("[API] ingest single commit ok")
+        return {"status": "ok"}
+    finally:
+        conn.close()
+
+@app.post("/api/ingest_bulk")
+async def api_ingest_bulk(payload: Dict[str, Any]):
+    ad_id = payload.get("ad_id")
+    items = payload.get("analytics_list") or []
+    if not isinstance(items, list):
+        return {"status": "error", "message": "analytics_list must be a list"}
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        print(f"[API] ingest bulk ad={ad_id} items={len(items)}")
+        for analytics in items:
+            tg = (analytics or {}).get("tracked_gender_counts") or {}
+            ng = (analytics or {}).get("new_gender_counts") or {}
+            ts = float((analytics or {}).get("timestamp") or datetime.now(timezone.utc).timestamp())
+            cur.execute(
+                """
+                INSERT INTO analytics (
+                    ts, ad_id, processing_time_ms, total_persons, total_faces,
+                    current_tracked_persons, unique_tracked_persons,
+                    gender_male, gender_female, gender_unknown,
+                    new_unique_persons, new_unique_faces,
+                    new_gender_male, new_gender_female, new_gender_unknown
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ts,
+                    ad_id,
+                    float((analytics or {}).get("processing_time_ms") or 0.0),
+                    int((analytics or {}).get("total_persons") or 0),
+                    int((analytics or {}).get("total_faces") or 0),
+                    int((analytics or {}).get("current_tracked_persons") or 0),
+                    int((analytics or {}).get("unique_tracked_persons") or 0),
+                    int(tg.get("male") or 0),
+                    int(tg.get("female") or 0),
+                    int(tg.get("unknown") or 0),
+                    int((analytics or {}).get("new_unique_persons") or 0),
+                    int((analytics or {}).get("new_unique_faces") or 0),
+                    int(ng.get("male") or 0),
+                    int(ng.get("female") or 0),
+                    int(ng.get("unknown") or 0),
+                ),
+            )
+            for ev in (analytics or {}).get("presence_events") or []:
+                cur.execute(
+                    """
+                    INSERT INTO presence_log (track_id, ad_id, start_ts, end_ts, duration_sec, age)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(ev.get("track_id") or 0),
+                        ad_id,
+                        float(ev.get("start_ts") or 0.0),
+                        float(ev.get("end_ts") or 0.0),
+                        float(ev.get("duration_sec") or 0.0),
+                        float(ev.get("age")) if ev.get("age") is not None else None,
+                    ),
+                )
+        conn.commit()
+        print("[API] ingest bulk commit ok")
+        return {"status": "ok", "count": len(items)}
+    finally:
+        conn.close()

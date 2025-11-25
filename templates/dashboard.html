@@ -273,7 +273,7 @@
             </div>
             <div class="kpi-card">
                 <div class="kpi-value" id="kpi-fps">0</div>
-                <div class="kpi-label">System FPS</div>
+                <div class="kpi-label">Ad Plays</div>
             </div>
         </div>
 
@@ -386,6 +386,24 @@
                 refreshAds();
             } catch (_) { }
         }
+
+        function isSameDay(a, b) {
+            return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+        }
+
+        // Keep end of 'today' range live by re-applying window so new data is included
+        setInterval(() => {
+            try {
+                const sel = rangePicker.selectedDates || [];
+                if (sel.length === 2) {
+                    const sDate = sel[0];
+                    const eDate = sel[1];
+                    if (isSameDay(eDate, new Date())) {
+                        applyDateRange(sel);
+                    }
+                }
+            } catch (_) {}
+        }, 5000);
 
         function ensureCharts() {
             // Set global Chart.js defaults for dark theme
@@ -671,7 +689,7 @@
             const avg = sessions > 0 ? Math.round(total / sessions) : 0;
             document.getElementById('kpi-footfall').textContent = sum.footfall || 0;
             document.getElementById('kpi-avg').textContent = avg + 's';
-            document.getElementById('kpi-fps').textContent = (sum.estimated_fps || 0).toFixed(1);
+            document.getElementById('kpi-fps').textContent = (sum.ad_plays || 0);
         }
 
         function renderFootfall(series) {
@@ -738,6 +756,7 @@
             ws.onmessage = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
+                    console.log('[WS]', msg.type, msg.summary ? { samples: msg.summary.samples, footfall: msg.summary.footfall } : {});
                     if (msg.type === 'snapshot' || msg.type === 'update') {
                         updateKPIs(msg.summary, msg.presence);
                         renderFootfall(msg.footfall.series || []);
@@ -754,7 +773,7 @@
                     }
                 } catch (_) { }
             };
-            ws.onclose = () => setTimeout(connect, 1000);
+            ws.onclose = () => setTimeout(connect, 30000);
         }
 
         function setDefaultRange() {
@@ -780,7 +799,7 @@
         }
 
         setDefaultRange();
-        setInterval(refreshAds, 3000);
+        setInterval(refreshAds, 30000);
         refreshAds();
         connect();
     </script>
