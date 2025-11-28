@@ -342,8 +342,7 @@
             dateFormat: 'Y-m-d',
             maxDate: 'today',
             disableMobile: true,
-            defaultDate: [new Date(), new Date()],
-            onChange: function (selectedDates, dateStr, instance) {
+            onChange: function (selectedDates) {
                 if (selectedDates.length === 2) {
                     applyDateRange(selectedDates);
                 }
@@ -776,16 +775,6 @@
             ws.onclose = () => setTimeout(connect, 30000);
         }
 
-        function setDefaultRange() {
-            const today = new Date();
-            const start = dayStart(today);
-            const end = dayEnd(today);
-            rangePicker.setDate([start, end], true);
-            const sTs = Math.floor(start.getTime() / 1000);
-            const nowTs = Math.floor(Date.now() / 1000);
-            const eTs = Math.min(Math.floor(end.getTime() / 1000), nowTs);
-            currentWindow = `range:${sTs}:${eTs}`;
-        }
 
         async function refreshAds() {
             try {
@@ -798,7 +787,6 @@
             } catch (_) { }
         }
 
-        setDefaultRange();
         setInterval(refreshAds, 30000);
         refreshAds();
         connect();
