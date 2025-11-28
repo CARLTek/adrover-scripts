@@ -373,7 +373,7 @@ def query_presence_stats(window: str) -> Dict[str, Any]:
     # Hour-of-day average dwell time
     cur.execute(
         """
-        SELECT STRFTIME('%H', datetime(start_ts, 'unixepoch')) AS hour,
+        SELECT CAST(STRFTIME('%H', datetime(start_ts, 'unixepoch', '+5 hours')) AS INTEGER) AS hour,
                AVG(duration_sec) AS avg_sec
         FROM presence_log
         WHERE start_ts >= ? AND start_ts <= ?

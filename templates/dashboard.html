@@ -366,7 +366,13 @@
 
         function fmtTs(t) {
             const d = new Date(t * 1000);
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
+        }
+        function fmtHour12(h) {
+            const hour = h % 24;
+            const suffix = hour >= 12 ? 'PM' : 'AM';
+            const display = hour % 12 === 0 ? 12 : hour % 12;
+            return `${display} ${suffix}`;
         }
 
         function applyDateRange(selectedDates) {
@@ -713,7 +719,7 @@
 
             const hours = (stats.by_hour || []).map(h => h.hour);
             const hourData = (stats.by_hour || []).map(h => (h.avg_sec || 0));
-            hourTrendChart.data.labels = hours.map(h => `${h}:00`);
+            hourTrendChart.data.labels = hours.map(h => fmtHour12(h));
             hourTrendChart.data.datasets[0].data = hourData;
             hourTrendChart.update();
         }
