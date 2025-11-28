@@ -30,7 +30,8 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 # ------------------------------------
 
-
+# DASHBOARD_URL = "http://127.0.0.1:8000"
+DASHBOARD_URL = "https://dashboard.carlteck.com"
 # ============================================================================
 #  Base
 # ============================================================================
@@ -614,7 +615,7 @@ class UnifiedServer:
         items = list(self._batch)
         self._batch.clear()
         if requests:
-            url = os.environ.get("DASHBOARD_INGEST_BULK_URL", os.environ.get("DASHBOARD_INGEST_URL", "http://127.0.0.1:8000/api/ingest_bulk"))
+            url = os.environ.get("DASHBOARD_INGEST_BULK_URL", os.environ.get("DASHBOARD_INGEST_URL", f"{DASHBOARD_URL}/api/ingest_bulk"))
             try:
                 print(f"[INGEST] flushing HTTP bulk ad={prev_ad} count={len(items)} url={url}")
                 resp = requests.post(url, json={"ad_id": prev_ad, "analytics_list": items}, timeout=5.0)
