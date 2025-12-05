@@ -334,7 +334,10 @@
 
     <script>
         const rangeInput = document.getElementById('dateRange');
-        let currentWindow = '1h';
+        let currentWindow = 'today';
+
+        // Get today's date for default selection
+        const today = new Date();
 
         const rangePicker = flatpickr(rangeInput, {
             mode: 'range',
@@ -342,6 +345,7 @@
             dateFormat: 'Y-m-d',
             maxDate: 'today',
             disableMobile: true,
+            defaultDate: [today, today],
             onChange: function (selectedDates) {
                 if (selectedDates.length === 2) {
                     applyDateRange(selectedDates);

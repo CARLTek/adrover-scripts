@@ -106,7 +106,8 @@ ensure_db_schema()
 
 
 def parse_window(window: str):
-    now = datetime.now(timezone.utc).timestamp()
+    import time
+    now = time.time()
     if isinstance(window, str) and window.startswith("range:"):
         try:
             _, s, e = window.split(":", 2)
@@ -115,6 +116,12 @@ def parse_window(window: str):
         except Exception:
             end_ts = now
             start_ts = end_ts - 3600
+    elif window == "today":
+        # Current date from midnight (local time) to now
+        today_local = datetime.now()
+        today_start = today_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ts = today_start.timestamp()
+        end_ts = now
     elif window.endswith("h"):
         hours = int(window[:-1])
         end_ts = now
@@ -124,8 +131,11 @@ def parse_window(window: str):
         end_ts = now
         start_ts = end_ts - days * 86400
     else:
+        # Default to today (local time)
+        today_local = datetime.now()
+        today_start = today_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_ts = today_start.timestamp()
         end_ts = now
-        start_ts = end_ts - 3600
     span = max(0.0, end_ts - start_ts)
     bucket_seconds = 60 if span <= 12 * 3600 else 300
     return start_ts, end_ts, bucket_seconds
@@ -465,6 +475,22 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
     except Exception:
         play_map = {}
 
+    # Fallback: include analytics-only ads (no presence yet) with viewers estimated from new_unique_persons
+    est = {}
+    try:
+        cur.execute(
+            """
+            SELECT ad_id, COALESCE(SUM(new_unique_persons), 0) AS viewers
+            FROM analytics
+            WHERE ts >= ? AND ts <= ? AND ad_id IS NOT NULL AND ad_id <> ''
+            GROUP BY ad_id
+            """,
+            (start_ts, end_ts)
+        )
+        est = {r[0]: int(r[1] or 0) for r in cur.fetchall()}
+    except Exception:
+        pass
+
     conn.close()
 
     stats = []
@@ -482,24 +508,10 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
             "plays": play_map.get(ad_id, {}).get("plays", 0),
             "total_sec": play_map.get(ad_id, {}).get("total_sec", 0.0),
         })
-    # Fallback: include analytics-only ads (no presence yet) with viewers estimated from new_unique_persons
-    try:
-        cur.execute(
-            """
-            SELECT ad_id, COALESCE(SUM(new_unique_persons), 0) AS viewers
-            FROM analytics
-            WHERE ts >= ? AND ts <= ? AND ad_id IS NOT NULL AND ad_id <> ''
-            GROUP BY ad_id
-            """,
-            (start_ts, end_ts)
-        )
-        est = {r[0]: int(r[1] or 0) for r in cur.fetchall()}
-        # Merge estimates where viewers are 0
-        for s in stats:
-            if s["viewers"] == 0:
-                s["viewers"] = est.get(s["ad_id"], 0)
-    except Exception:
-        pass
+    # Merge estimates where viewers are 0
+    for s in stats:
+        if s["viewers"] == 0:
+            s["viewers"] = est.get(s["ad_id"], 0)
     # Ensure newly uploaded ads appear even without analytics yet
     try:
         files = []
@@ -565,7 +577,7 @@ async def index(request: Request):
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     _ws_clients.add(ws)
-    window = "1h"
+    window = "today"
     try:
         # Initial push
         payload = {
@@ -618,7 +630,7 @@ async def websocket_endpoint(ws: WebSocket):
             _ws_clients.discard(ws)
 
 @app.get("/api/ad_stats")
-async def api_ad_stats(window: str = "1h"):
+async def api_ad_stats(window: str = "today"):
     return query_ad_stats(window)
 
 @app.get("/api/current_ad")
