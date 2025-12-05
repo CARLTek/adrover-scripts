@@ -548,8 +548,8 @@ def play_ads_fullscreen():
 
                             subprocess.run([
                                 "gst-launch-1.0", "filesrc", f"location={path}", "!", "qtdemux", "name=demux",
-                                "demux.video_0", "!", "queue", "!", "h264parse", "!", "nvv4l2decoder",
-                                "!", "nvvidconv", "flip-method=3", "!", "nvoverlaysink", "sync=false"
+                                "demux.video_0", "!", "queue", "!", "h264parse", "!", "avdec_h264",
+                                "!", "videoconvert", "!", "autovideosink", "sync=false"
                             ], check=True)
                         except subprocess.CalledProcessError as e:
                             print("GStreamer error:", e)
