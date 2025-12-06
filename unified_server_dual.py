@@ -30,8 +30,8 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 # ------------------------------------
 
-DASHBOARD_URL = "http://127.0.0.1:8000"
-# DASHBOARD_URL = "https://dashboard.carlteck.com"
+# DASHBOARD_URL = "http://127.0.0.1:8000"
+DASHBOARD_URL = "https://dashboard.carlteck.com"
 # ============================================================================
 #  Base
 # ============================================================================
@@ -877,7 +877,7 @@ async def main():
     parser.add_argument("--show", action="store_true", help="open server-side preview window")
     args = parser.parse_args()
 
-    server = UnifiedServer(host="127.0.0.1", port=12350, engine="mivolo", show_preview=args.show)
+    server = UnifiedServer(host="0.0.0.0", port=12350, engine="mivolo", show_preview=args.show)
     await server.start()
 
 

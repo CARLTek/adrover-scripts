@@ -419,7 +419,7 @@ def parse_camera_arg(cam_arg: str):
 
 async def main():
     parser = argparse.ArgumentParser(description='Unified client with dwell-time overlay')
-    parser.add_argument('--server-ip', default='127.0.0.1')
+    parser.add_argument('--server-ip', default='0.0.0.0')
     parser.add_argument('--server-port', type=int, default=12350)
     parser.add_argument('--camera', default='0', help='Camera index (e.g., 0) or URL/path')
     parser.add_argument('--show-window', action='store_true', help='Show overlay window with detections and dwell time')
