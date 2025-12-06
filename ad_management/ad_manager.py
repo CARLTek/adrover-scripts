@@ -88,35 +88,14 @@ def init_ad_plays_table():
     conn.close()
 
 def record_ad_play_start(ad_id: str) -> int:
-    """Record ad play start locally (GPU server sends to remote dashboard)"""
-    ts = time.time()
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO ad_plays (ad_id, start_ts) VALUES (?, ?)",
-        (ad_id, float(ts)),
-    )
-    conn.commit()
-    row_id = cur.lastrowid
-    conn.close()
-    return row_id
+    """No-op: GPU server handles ad_play tracking via dashboard API"""
+    # Ad plays are now tracked by the GPU server, not locally
+    return 0
 
 def record_ad_play_end(row_id: int):
-    """Record ad play end locally (GPU server sends to remote dashboard)"""
-    ts = time.time()
-    conn = get_db()
-    cur = conn.cursor()
-    # Compute duration based on start_ts
-    cur.execute("SELECT start_ts FROM ad_plays WHERE id = ?", (row_id,))
-    r = cur.fetchone()
-    start_ts = float(r[0]) if r else ts
-    dur = max(0.0, float(ts) - start_ts)
-    cur.execute(
-        "UPDATE ad_plays SET end_ts = ?, duration_sec = ? WHERE id = ?",
-        (float(ts), float(dur), int(row_id)),
-    )
-    conn.commit()
-    conn.close()
+    """No-op: GPU server handles ad_play tracking via dashboard API"""
+    # Ad plays are now tracked by the GPU server, not locally
+    pass
 
 # === Dashboard Notify (ad list changes) ===
 def notify_dashboard_ad_change():

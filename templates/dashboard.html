@@ -765,7 +765,7 @@
             ws.onmessage = (ev) => {
                 try {
                     const msg = JSON.parse(ev.data);
-                    console.log('[WS]', msg.type, msg.summary ? { samples: msg.summary.samples, footfall: msg.summary.footfall } : {});
+                    console.log('[WS]', msg.type, msg.summary ? { footfall: msg.summary.footfall } : {});
                     if (msg.type === 'snapshot' || msg.type === 'update') {
                         updateKPIs(msg.summary, msg.presence);
                         renderFootfall(msg.footfall.series || []);
@@ -777,6 +777,21 @@
                         if (msg.presence_stats) {
                             renderPresenceStats(msg.presence_stats);
                         }
+                    } else if (msg.type === 'push_update') {
+                        // Real-time update from GPU server
+                        console.log('[WS] Push update for ad:', msg.ad_id);
+                        if (msg.summary) {
+                            const gsum = msg.summary.gender || { male: 0, female: 0, unknown: 0 };
+                            renderGenderPie(gsum);
+                        }
+                        if (msg.age) {
+                            renderAgePie(msg.age);
+                        }
+                        if (msg.presence_stats) {
+                            renderPresenceStats(msg.presence_stats);
+                        }
+                        // Refresh ad stats
+                        refreshAds();
                     } else if (msg.type === 'ad_changed') {
                         refreshAds();
                     }

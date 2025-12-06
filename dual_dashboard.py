@@ -491,11 +491,26 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+    # Also get ads from ad_plays table (even if no analytics data yet)
+    ads_from_plays = set()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT ad_id FROM ad_plays
+            WHERE ad_id IS NOT NULL AND ad_id <> ''
+            """
+        )
+        ads_from_plays = {r[0] for r in cur.fetchall()}
+    except Exception:
+        pass
+
     conn.close()
 
     stats = []
+    seen_ads = set()
     for r in rows:
         ad_id = r[0]
+        seen_ads.add(ad_id)
         male = int(r[1] or 0)
         female = int(r[2] or 0)
         unknown = int(r[3] or 0)
@@ -512,6 +527,20 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
     for s in stats:
         if s["viewers"] == 0:
             s["viewers"] = est.get(s["ad_id"], 0)
+    
+    # Add ads from ad_plays that aren't in analytics yet
+    for ad_id in ads_from_plays:
+        if ad_id not in seen_ads:
+            seen_ads.add(ad_id)
+            stats.append({
+                "ad_id": ad_id,
+                "viewers": est.get(ad_id, 0),
+                "male": 0,
+                "female": 0,
+                "unknown": 0,
+                "plays": play_map.get(ad_id, {}).get("plays", 0),
+                "total_sec": play_map.get(ad_id, {}).get("total_sec", 0.0),
+            })
     # Ensure newly uploaded ads appear even without analytics yet
     try:
         files = []
@@ -527,24 +556,23 @@ def query_ad_stats(window: str) -> Dict[str, Any]:
             ads_dir = 'advertisement'
             if os.path.isdir(ads_dir):
                 files = sorted([f for f in os.listdir(ads_dir) if allowed_file(f)])
-        have = set([s["ad_id"] for s in stats])
         for f in files:
-            if f not in have and allowed_file(f):
+            if f not in seen_ads and allowed_file(f):
+                seen_ads.add(f)
                 stats.append({
                     "ad_id": f,
                     "viewers": 0,
-                    "current_viewers": 0,
-                    "window_viewers": 0,
                     "male": 0,
                     "female": 0,
                     "unknown": 0,
-                    "plays": 0,
-                    "total_sec": 0.0,
+                    "plays": play_map.get(f, {}).get("plays", 0),
+                    "total_sec": play_map.get(f, {}).get("total_sec", 0.0),
                 })
-        # Sort stats by filename for stable UI ordering
-        stats = sorted(stats, key=lambda x: str(x.get("ad_id") or ""))
     except Exception:
         pass
+    
+    # Sort stats by filename for stable UI ordering
+    stats = sorted(stats, key=lambda x: str(x.get("ad_id") or ""))
     return {"stats": stats}
 
 def query_current_ad() -> Dict[str, Any]:
@@ -577,6 +605,8 @@ async def index(request: Request):
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     _ws_clients.add(ws)
+    client_id = id(ws)
+    print(f"[WS] Client {client_id} connected (total: {len(_ws_clients)})")
     window = "today"
     try:
         # Initial push
@@ -590,7 +620,7 @@ async def websocket_endpoint(ws: WebSocket):
             "presence_stats": query_presence_stats(window),
             "window": window,
         }
-        print(f"[WS] send snapshot window={window} summary_samples={payload['summary'].get('samples')} footfall={payload['summary'].get('footfall')}")
+        print(f"[WS:{client_id}] snapshot samples={payload['summary'].get('samples')} footfall={payload['summary'].get('footfall')}")
         await ws.send_json(payload)
 
         # Listen for window change from client and periodically push updates
@@ -606,10 +636,6 @@ async def websocket_endpoint(ws: WebSocket):
                     "presence": query_presence_summary(window),
                     "presence_stats": query_presence_stats(window),
                 }
-                try:
-                    print(f"[WS] send update window={window} summary_samples={upd['summary'].get('samples')} footfall={upd['summary'].get('footfall')}")
-                except Exception:
-                    pass
                 await ws.send_json(upd)
 
         sender_task = asyncio.create_task(sender())
@@ -628,10 +654,13 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         with contextlib.suppress(Exception):
             _ws_clients.discard(ws)
+            print(f"[WS] Client {client_id} disconnected (remaining: {len(_ws_clients)})")
 
 @app.get("/api/ad_stats")
 async def api_ad_stats(window: str = "today"):
-    return query_ad_stats(window)
+    result = query_ad_stats(window)
+    print(f"[API] ad_stats window={window} count={len(result.get('stats', []))}")
+    return result
 
 @app.get("/api/current_ad")
 async def api_current_ad():
@@ -650,6 +679,87 @@ async def api_notify_ad_change():
         with contextlib.suppress(Exception):
             _ws_clients.discard(d)
     return {"status": "ok"}
+
+@app.post("/api/push_update")
+async def api_push_update(payload: Dict[str, Any]):
+    """Receive complete update from GPU server and broadcast to all WebSocket clients"""
+    ad_id = payload.get("ad_id")
+    print(f"[PUSH] Received update for ad={ad_id} footfall={payload.get('summary', {}).get('footfall', 0)}")
+    
+    # Store in database for persistence
+    try:
+        summary = payload.get("summary") or {}
+        presence = payload.get("presence") or {}
+        
+        conn = get_db()
+        cur = conn.cursor()
+        
+        # Insert summary analytics
+        gender = summary.get("gender") or {}
+        cur.execute(
+            """
+            INSERT INTO analytics (
+                ts, ad_id, processing_time_ms, total_persons, total_faces,
+                current_tracked_persons, unique_tracked_persons,
+                gender_male, gender_female, gender_unknown,
+                new_unique_persons, new_unique_faces,
+                new_gender_male, new_gender_female, new_gender_unknown
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.now(timezone.utc).timestamp(),
+                ad_id, 0, 0, 0, 0, 0,
+                gender.get("male", 0), gender.get("female", 0), gender.get("unknown", 0),
+                summary.get("footfall", 0), 0,
+                gender.get("male", 0), gender.get("female", 0), gender.get("unknown", 0),
+            )
+        )
+        
+        # Insert presence events for dwell time tracking
+        for ev in presence.get("events") or []:
+            cur.execute(
+                """
+                INSERT INTO presence_log (track_id, ad_id, start_ts, end_ts, duration_sec, age)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(ev.get("track_id") or 0),
+                    ad_id,
+                    float(ev.get("start_ts") or 0.0),
+                    float(ev.get("end_ts") or 0.0),
+                    float(ev.get("duration_sec") or 0.0),
+                    float(ev.get("age")) if ev.get("age") is not None else None,
+                )
+            )
+        
+        conn.commit()
+        conn.close()
+        print(f"[PUSH] Saved: analytics + {len(presence.get('events') or [])} presence events")
+    except Exception as e:
+        print(f"[PUSH] DB save error: {e}")
+    
+    # Broadcast to all WebSocket clients
+    dead = []
+    broadcast_payload = {
+        "type": "push_update",
+        "ad_id": ad_id,
+        "summary": payload.get("summary"),
+        "age": payload.get("age"),
+        "presence": payload.get("presence"),
+        "presence_stats": payload.get("presence_stats"),
+        "ad_play": payload.get("ad_play"),
+    }
+    for client in list(_ws_clients):
+        try:
+            await client.send_json(broadcast_payload)
+        except Exception:
+            dead.append(client)
+    for d in dead:
+        with contextlib.suppress(Exception):
+            _ws_clients.discard(d)
+    
+    print(f"[PUSH] Broadcasted to {len(_ws_clients)} clients")
+    return {"status": "ok", "clients": len(_ws_clients)}
 
 @app.post("/api/ad_play_start")
 async def api_ad_play_start(payload: Dict[str, Any]):

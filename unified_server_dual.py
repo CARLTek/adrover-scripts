@@ -459,17 +459,20 @@ class UnifiedServer:
         else:
             raise ValueError("engine must be one of: mivolo, deepface")
 
-        # SQLite
+        # SQLite (local backup only)
         self._db = sqlite3.connect("camera_analytics.db", check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db_lock = asyncio.Lock()
         self._init_db()
-        # batching state
+        
+        # Current ad tracking
         self._current_ad_id: Optional[str] = None
-        self._batch: List[Dict[str, Any]] = []
-        # ad play tracking (for sending to dashboard)
-        self._current_ad_play_row_id: Optional[int] = None
         self._current_ad_start_ts: Optional[float] = None
+        self._current_ad_play_row_id: Optional[int] = None
+        
+        # Accumulated stats for current ad (sent to dashboard when ad changes)
+        self._ad_stats: Dict[str, Dict[str, Any]] = {}  # ad_id -> stats
+        self._reset_current_ad_stats()
 
     # ------------------------------------------------------------------
     def _init_db(self):
@@ -611,6 +614,153 @@ class UnifiedServer:
                 pass
         self._db.commit()
 
+    def _reset_current_ad_stats(self):
+        """Reset accumulated stats for current ad"""
+        self._current_stats = {
+            "footfall": 0,
+            "male": 0,
+            "female": 0,
+            "unknown": 0,
+            "total_presence_sec": 0.0,
+            "presence_sessions": 0,
+            "presence_bins": [0, 0, 0, 0, 0, 0],  # 0-5s, 5-15s, 15-30s, 30-60s, 60-120s, >120s
+            "age_child": 0,
+            "age_young_adult": 0,
+            "age_adult": 0,
+            "age_unknown": 0,
+            "hourly_presence": {},  # hour -> [total_sec, count]
+            "samples": 0,
+            "presence_events": [],  # Store all presence events for database
+        }
+
+    def _accumulate_analytics(self, analytics: Dict[str, Any]):
+        """Accumulate analytics data for current ad"""
+        s = self._current_stats
+        s["samples"] += 1
+        
+        # Footfall (new unique persons)
+        s["footfall"] += int(analytics.get("new_unique_persons") or 0)
+        
+        # Gender counts
+        ng = analytics.get("new_gender_counts") or {}
+        s["male"] += int(ng.get("male") or 0)
+        s["female"] += int(ng.get("female") or 0)
+        s["unknown"] += int(ng.get("unknown") or 0)
+        
+        # Presence events
+        for ev in analytics.get("presence_events") or []:
+            dur = float(ev.get("duration_sec") or 0)
+            s["total_presence_sec"] += dur
+            s["presence_sessions"] += 1
+            
+            # Store event for database
+            s["presence_events"].append({
+                "track_id": ev.get("track_id"),
+                "start_ts": ev.get("start_ts"),
+                "end_ts": ev.get("end_ts"),
+                "duration_sec": dur,
+                "age": ev.get("age"),
+            })
+            
+            # Histogram bins
+            if dur < 5:
+                s["presence_bins"][0] += 1
+            elif dur < 15:
+                s["presence_bins"][1] += 1
+            elif dur < 30:
+                s["presence_bins"][2] += 1
+            elif dur < 60:
+                s["presence_bins"][3] += 1
+            elif dur < 120:
+                s["presence_bins"][4] += 1
+            else:
+                s["presence_bins"][5] += 1
+            
+            # Age distribution
+            age = ev.get("age")
+            if age is None or age < 0:
+                s["age_unknown"] += 1
+            elif age <= 15:
+                s["age_child"] += 1
+            elif age <= 40:
+                s["age_young_adult"] += 1
+            else:
+                s["age_adult"] += 1
+            
+            # Hourly presence
+            start_ts = ev.get("start_ts")
+            if start_ts:
+                hour = int((start_ts % 86400) // 3600)  # Hour of day (0-23)
+                if hour not in s["hourly_presence"]:
+                    s["hourly_presence"][hour] = [0.0, 0]
+                s["hourly_presence"][hour][0] += dur
+                s["hourly_presence"][hour][1] += 1
+
+    def _build_dashboard_payload(self) -> Dict[str, Any]:
+        """Build complete payload for dashboard from accumulated stats"""
+        s = self._current_stats
+        ad_id = self._current_ad_id
+        
+        # Build hourly data
+        by_hour = []
+        for hour in sorted(s["hourly_presence"].keys()):
+            total_sec, count = s["hourly_presence"][hour]
+            avg_sec = total_sec / count if count > 0 else 0
+            by_hour.append({"hour": hour, "avg_sec": avg_sec})
+        
+        # Calculate duration for current ad
+        duration_sec = 0.0
+        if self._current_ad_start_ts:
+            duration_sec = time.time() - self._current_ad_start_ts
+        
+        return {
+            "type": "ad_complete",
+            "ad_id": ad_id,
+            "summary": {
+                "footfall": s["footfall"],
+                "gender": {
+                    "male": s["male"],
+                    "female": s["female"],
+                    "unknown": s["unknown"],
+                },
+                "samples": s["samples"],
+            },
+            "age": {
+                "child": s["age_child"],
+                "young_adult": s["age_young_adult"],
+                "adult": s["age_adult"],
+                "unknown": s["age_unknown"],
+            },
+            "presence": {
+                "total_presence_sec": s["total_presence_sec"],
+                "sessions": s["presence_sessions"],
+                "events": s["presence_events"],  # For database storage
+            },
+            "presence_stats": {
+                "histogram": {
+                    "bins": s["presence_bins"],
+                    "labels": ["0-5s", "5-15s", "15-30s", "30-60s", "60-120s", ">120s"],
+                },
+                "by_hour": by_hour,
+            },
+            "ad_play": {
+                "ad_id": ad_id,
+                "duration_sec": duration_sec,
+            },
+        }
+
+    def _send_dashboard_update(self):
+        """Send complete update to dashboard"""
+        if not requests:
+            return
+        payload = self._build_dashboard_payload()
+        try:
+            url = f"{DASHBOARD_URL}/api/push_update"
+            resp = requests.post(url, json=payload, timeout=5.0)
+            print(f"[PUSH] Sent update to dashboard: ad={payload.get('ad_id')} footfall={payload['summary']['footfall']} status={resp.status_code}")
+        except Exception as e:
+            print(f"[PUSH] Failed to send update: {e}")
+
     def _send_ad_play_start(self, ad_id: str) -> Optional[int]:
         """Send ad play start to dashboard, return row_id"""
         if not ad_id or not requests:
@@ -642,28 +792,6 @@ class UnifiedServer:
         except Exception as e:
             print(f"[AD_PLAY] End failed: {e}")
 
-    async def _flush_batch(self):
-        prev_ad = self._current_ad_id
-        if not self._batch:
-            return
-        items = list(self._batch)
-        self._batch.clear()
-        if requests:
-            url = os.environ.get("DASHBOARD_INGEST_BULK_URL", os.environ.get("DASHBOARD_INGEST_URL", f"{DASHBOARD_URL}/api/ingest_bulk"))
-            try:
-                print(f"[INGEST] flushing HTTP bulk ad={prev_ad} count={len(items)} url={url}")
-                resp = requests.post(url, json={"ad_id": prev_ad, "analytics_list": items}, timeout=5.0)
-                print(f"[INGEST] bulk response status={getattr(resp, 'status_code', None)}")
-                return
-            except Exception as e:
-                print(f"[INGEST] bulk HTTP failed: {e}")
-        for analytics in items:
-            try:
-                print(f"[INGEST] fallback local save ad={prev_ad}")
-                await self._save_analytics(prev_ad, analytics)
-            except Exception as e:
-                print(f"[INGEST] local save failed: {e}")
-
     # ------------------------------------------------------------------
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info("peername")
@@ -692,49 +820,42 @@ class UnifiedServer:
                     payload["ad_id"] = ad_id
                 await write_response(writer, payload)
 
-                # batching: append and flush on ad change
+                # Accumulate stats and send to dashboard when ad changes
                 try:
-                    # initialize current ad on first frame
-                    if self._current_ad_id is None:
-                        self._current_ad_id = ad_id
-                        # Start tracking first ad play
-                        if ad_id:
-                            self._current_ad_start_ts = time.time()
-                            self._current_ad_play_row_id = self._send_ad_play_start(ad_id)
-                    # if ad changes, flush previous batch and track ad play
+                    # Check if ad changed (including first frame)
                     if ad_id != self._current_ad_id:
-                        print(f"[INGEST] ad changed prev={self._current_ad_id} new={ad_id}")
-                        # End previous ad play
-                        if self._current_ad_play_row_id:
-                            self._send_ad_play_end(self._current_ad_play_row_id)
-                        await self._flush_batch()
+                        # Send update for previous ad (if any)
+                        if self._current_ad_id is not None:
+                            print(f"[AD] Changed: {self._current_ad_id} -> {ad_id}")
+                            self._send_dashboard_update()
+                            if self._current_ad_play_row_id:
+                                self._send_ad_play_end(self._current_ad_play_row_id)
+                        
+                        # Reset stats for new ad
+                        self._reset_current_ad_stats()
                         self._current_ad_id = ad_id
-                        # Start new ad play
+                        
+                        # Start tracking new ad
                         if ad_id:
                             self._current_ad_start_ts = time.time()
                             self._current_ad_play_row_id = self._send_ad_play_start(ad_id)
                         else:
-                            self._current_ad_play_row_id = None
                             self._current_ad_start_ts = None
-                    # append current analytics to batch
-                    self._batch.append(analytics)
-                    print(f"[INGEST] queued ad={ad_id} ts={analytics.get('timestamp')} batch_size={len(self._batch)}")
-                    # safety: flush if batch grows too large
-                    if len(self._batch) >= 500:
-                        await self._flush_batch()
-                except Exception:
-                    pass
+                            self._current_ad_play_row_id = None
+                    
+                    # Accumulate analytics for current ad
+                    self._accumulate_analytics(analytics)
+                except Exception as e:
+                    print(f"[AD] Error: {e}")
         finally:
             try:
-                # End current ad play when connection closes
-                if self._current_ad_play_row_id:
-                    self._send_ad_play_end(self._current_ad_play_row_id)
-                    self._current_ad_play_row_id = None
-                # flush any remaining batch when connection closes
-                try:
-                    await self._flush_batch()
-                except Exception:
-                    pass
+                # Send final update when connection closes
+                if self._current_ad_id is not None:
+                    print(f"[AD] Connection closed, sending final update for: {self._current_ad_id}")
+                    self._send_dashboard_update()
+                    if self._current_ad_play_row_id:
+                        self._send_ad_play_end(self._current_ad_play_row_id)
+                        self._current_ad_play_row_id = None
                 writer.close()
                 await writer.wait_closed()
             except Exception:
