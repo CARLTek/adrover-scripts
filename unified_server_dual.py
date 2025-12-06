@@ -467,6 +467,9 @@ class UnifiedServer:
         # batching state
         self._current_ad_id: Optional[str] = None
         self._batch: List[Dict[str, Any]] = []
+        # ad play tracking (for sending to dashboard)
+        self._current_ad_play_row_id: Optional[int] = None
+        self._current_ad_start_ts: Optional[float] = None
 
     # ------------------------------------------------------------------
     def _init_db(self):
@@ -608,6 +611,37 @@ class UnifiedServer:
                 pass
         self._db.commit()
 
+    def _send_ad_play_start(self, ad_id: str) -> Optional[int]:
+        """Send ad play start to dashboard, return row_id"""
+        if not ad_id or not requests:
+            return None
+        ts = time.time()
+        try:
+            url = f"{DASHBOARD_URL}/api/ad_play_start"
+            resp = requests.post(url, json={"ad_id": ad_id, "start_ts": ts}, timeout=2.0)
+            if resp and resp.ok:
+                data = resp.json()
+                row_id = data.get("row_id")
+                print(f"[AD_PLAY] Start sent: ad={ad_id} row_id={row_id}")
+                return row_id
+        except Exception as e:
+            print(f"[AD_PLAY] Start failed: {e}")
+        return None
+
+    def _send_ad_play_end(self, row_id: Optional[int]) -> None:
+        """Send ad play end to dashboard"""
+        if not row_id or not requests:
+            return
+        ts = time.time()
+        try:
+            url = f"{DASHBOARD_URL}/api/ad_play_end"
+            resp = requests.post(url, json={"row_id": row_id, "end_ts": ts}, timeout=2.0)
+            if resp and resp.ok:
+                data = resp.json()
+                print(f"[AD_PLAY] End sent: row_id={row_id} duration={data.get('duration_sec', 0):.1f}s")
+        except Exception as e:
+            print(f"[AD_PLAY] End failed: {e}")
+
     async def _flush_batch(self):
         prev_ad = self._current_ad_id
         if not self._batch:
@@ -663,11 +697,25 @@ class UnifiedServer:
                     # initialize current ad on first frame
                     if self._current_ad_id is None:
                         self._current_ad_id = ad_id
-                    # if ad changes, flush previous batch
+                        # Start tracking first ad play
+                        if ad_id:
+                            self._current_ad_start_ts = time.time()
+                            self._current_ad_play_row_id = self._send_ad_play_start(ad_id)
+                    # if ad changes, flush previous batch and track ad play
                     if ad_id != self._current_ad_id:
                         print(f"[INGEST] ad changed prev={self._current_ad_id} new={ad_id}")
+                        # End previous ad play
+                        if self._current_ad_play_row_id:
+                            self._send_ad_play_end(self._current_ad_play_row_id)
                         await self._flush_batch()
                         self._current_ad_id = ad_id
+                        # Start new ad play
+                        if ad_id:
+                            self._current_ad_start_ts = time.time()
+                            self._current_ad_play_row_id = self._send_ad_play_start(ad_id)
+                        else:
+                            self._current_ad_play_row_id = None
+                            self._current_ad_start_ts = None
                     # append current analytics to batch
                     self._batch.append(analytics)
                     print(f"[INGEST] queued ad={ad_id} ts={analytics.get('timestamp')} batch_size={len(self._batch)}")
@@ -678,6 +726,10 @@ class UnifiedServer:
                     pass
         finally:
             try:
+                # End current ad play when connection closes
+                if self._current_ad_play_row_id:
+                    self._send_ad_play_end(self._current_ad_play_row_id)
+                    self._current_ad_play_row_id = None
                 # flush any remaining batch when connection closes
                 try:
                     await self._flush_batch()

@@ -36,7 +36,7 @@ app.config['SECRET_KEY'] = 'jetson-ad-manager-2024'
 app.config['DWELL_SERVER_HOST'] = os.environ.get('DWELL_SERVER_HOST', '127.0.0.1')
 app.config['DWELL_SERVER_PORT'] = int(os.environ.get('DWELL_SERVER_PORT', '12350'))
 app.config['CAMERA_SOURCE'] = int(os.environ.get('CAMERA_SOURCE', '0'))
-app.config['DASHBOARD_URL'] = os.environ.get('DASHBOARD_URL', 'http://127.0.0.1:5000')
+app.config['DASHBOARD_URL'] = os.environ.get('DASHBOARD_URL', 'http://127.0.0.1:8000')
 
 ALLOWED_EXTENSIONS = {
     'images': {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'},
@@ -88,6 +88,7 @@ def init_ad_plays_table():
     conn.close()
 
 def record_ad_play_start(ad_id: str) -> int:
+    """Record ad play start locally (GPU server sends to remote dashboard)"""
     ts = time.time()
     conn = get_db()
     cur = conn.cursor()
@@ -101,6 +102,7 @@ def record_ad_play_start(ad_id: str) -> int:
     return row_id
 
 def record_ad_play_end(row_id: int):
+    """Record ad play end locally (GPU server sends to remote dashboard)"""
     ts = time.time()
     conn = get_db()
     cur = conn.cursor()

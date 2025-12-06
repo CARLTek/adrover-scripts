@@ -650,6 +650,52 @@ async def api_notify_ad_change():
         with contextlib.suppress(Exception):
             _ws_clients.discard(d)
     return {"status": "ok"}
+
+@app.post("/api/ad_play_start")
+async def api_ad_play_start(payload: Dict[str, Any]):
+    """Record the start of an ad play from remote client"""
+    ad_id = payload.get("ad_id")
+    start_ts = float(payload.get("start_ts") or datetime.now(timezone.utc).timestamp())
+    if not ad_id:
+        return {"status": "error", "message": "ad_id required"}
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO ad_plays (ad_id, start_ts) VALUES (?, ?)",
+            (ad_id, start_ts)
+        )
+        conn.commit()
+        row_id = cur.lastrowid
+        print(f"[API] ad_play_start ad={ad_id} row_id={row_id}")
+        return {"status": "ok", "row_id": row_id}
+    finally:
+        conn.close()
+
+@app.post("/api/ad_play_end")
+async def api_ad_play_end(payload: Dict[str, Any]):
+    """Record the end of an ad play from remote client"""
+    row_id = payload.get("row_id")
+    end_ts = float(payload.get("end_ts") or datetime.now(timezone.utc).timestamp())
+    if not row_id:
+        return {"status": "error", "message": "row_id required"}
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        # Get start_ts to calculate duration
+        cur.execute("SELECT start_ts FROM ad_plays WHERE id = ?", (int(row_id),))
+        r = cur.fetchone()
+        start_ts = float(r[0]) if r else end_ts
+        duration = max(0.0, end_ts - start_ts)
+        cur.execute(
+            "UPDATE ad_plays SET end_ts = ?, duration_sec = ? WHERE id = ?",
+            (end_ts, duration, int(row_id))
+        )
+        conn.commit()
+        print(f"[API] ad_play_end row_id={row_id} duration={duration:.1f}s")
+        return {"status": "ok", "duration_sec": duration}
+    finally:
+        conn.close()
 @app.post("/api/ingest")
 async def api_ingest(payload: Dict[str, Any]):
     ad_id = payload.get("ad_id")
